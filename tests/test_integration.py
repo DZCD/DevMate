@@ -397,8 +397,13 @@ route = "/mcp"
             for t in agent._tools
             if hasattr(t, "name") and isinstance(t.name, str)
         ]
+        assert "read" in tool_names
+        assert "write" in tool_names
+        assert "edit" in tool_names
+        assert "glob" in tool_names
+        assert "grep" in tool_names
+        assert "bash" in tool_names
         assert "create_file" in tool_names
-        assert "write_file" in tool_names
         assert "list_directory" in tool_names
         assert "search_knowledge_base" in tool_names
 
@@ -635,7 +640,7 @@ Use functional components with hooks.
 
         tools = create_file_tools(workspace=workspace)
         create_file_tool = next(t for t in tools if t.name == "create_file")
-        write_file_tool = next(t for t in tools if t.name == "write_file")
+        write_tool = next(t for t in tools if t.name == "write")
 
         # Create then update the skill file
         initial_content = '---\nname: "web_api"\ndescription: "placeholder"\n---\n'
@@ -657,7 +662,7 @@ trigger_keywords: ["api", "rest", "endpoint", "http"]
 
 Follow RESTful conventions for all API endpoints.
 """
-        write_file_tool.invoke(
+        write_tool.invoke(
             {
                 "file_path": str(skill_folder / "SKILL.md"),
                 "content": updated_content,

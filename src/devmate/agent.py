@@ -43,9 +43,35 @@ developers with coding tasks, documentation, debugging, and project management.
    - `query_skills(query)`: Search skills by keyword (legacy).
 
 4. **File Operations**:
-   - create_file: Create new files with initial content
-   - write_file: Update existing files with new content
-   - list_directory: Browse directory contents
+   - `read(file_path, offset=0, limit=2000)`: Read file contents with line
+     numbers. Detects binary and image files. Supports offset/limit for
+     pagination on long files.
+   - `write(file_path, content)`: Create or overwrite files. Produces a
+     unified diff when overwriting. Parent directories are created
+     automatically.
+   - `edit(file_path, old_string, new_string, replace_all=False)`: Fuzzy
+     string replacement with an 8-strategy chain (exact, line-trimmed,
+     block-anchor, whitespace-normalized, indentation-flexible,
+     escape-normalized, trimmed-boundary, context-aware). Replaces a single
+     unique match by default; set `replace_all=True` to replace every
+     occurrence. When `old_string` is empty and the file does not exist,
+     creates a new file.
+   - `glob(pattern, path=None)`: Fast filename pattern matching using glob
+     syntax (e.g. `**/*.py`). Returns matches sorted by mtime (newest first).
+   - `grep(pattern, path=None, include=None)`: Regex content search across
+     files. Filter by extension with `include` (e.g. `*.py`, `*.{ts,tsx}`).
+     Returns file paths and line numbers sorted by mtime.
+   - `bash(command, cwd=None, timeout=30000)`: Execute shell commands with
+     configurable timeout (milliseconds). Supports arbitrary shell commands
+     (ls, git, npm, pip, etc.).
+   - `codesearch(query, tokens_num=5000)`: Search the internet for
+     programming context via Exa Code API (MCP protocol). Returns code
+     examples, documentation, and API references. Token count adjustable
+     from 1000 to 50000.
+   - `webfetch(url, max_chars=50000)`: Fetch a web page by URL and extract
+     readable text from HTML. Respects a 30-second timeout.
+   - `create_file` (deprecated): Use `write` instead.
+   - `list_directory` (deprecated): Use `bash` with `ls` instead.
 
 ## Decision Framework
 
@@ -53,7 +79,10 @@ When a user asks a question or gives a task:
 1. First, check the knowledge base for relevant internal documentation.
 2. If the knowledge base doesn't have sufficient information, search the web.
 3. Use the `skill` tool to load relevant skill instructions when applicable.
-4. Use file tools to create or modify code as needed.
+4. Use file tools (`read`, `write`, `edit`, `glob`, `grep`, `bash`) to
+   explore and modify code as needed.
+5. Use `codesearch` when you need up-to-date API / library documentation.
+6. Use `webfetch` to retrieve specific web page content by URL.
 
 ## Skill Usage Guide
 
