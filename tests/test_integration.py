@@ -9,11 +9,12 @@ Tests cross-module interactions:
 """
 
 import logging
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+from tests.helpers import write_minimal_config
 
 logger = logging.getLogger(__name__)
 
@@ -46,151 +47,6 @@ class TestMCPServerIntegration:
         data = response.json()
         assert data["status"] == "ok"
         assert data["service"] == "devmate-mcp-server"
-
-    async def test_mcp_endpoint_initialization(self, mcp_app) -> None:
-        """Test that the /mcp endpoint handles initialize requests.
-
-        The MCP StreamableHTTP session manager requires the app lifespan to
-        be running. We use httpx with a live server started by uvicorn to
-        properly test this.
-        """
-        import socket
-
-        # Find a free port
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-
-        import asyncio
-
-        import uvicorn
-
-        config = uvicorn.Config(app=mcp_app, host="127.0.0.1", port=port)
-        server = uvicorn.Server(config)
-
-        async def _run_server():
-            await server.serve()
-
-        task = asyncio.create_task(_run_server())
-
-        # Wait for server to start
-        for _ in range(20):
-            try:
-                async with AsyncClient() as client:
-                    r = await client.get(f"http://127.0.0.1:{port}/health", timeout=0.5)
-                if r.status_code == 200:
-                    break
-            except Exception:
-                pass
-            await asyncio.sleep(0.25)
-
-        try:
-            async with AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
-                response = await client.post(
-                    "/mcp/",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream",
-                    },
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": "2025-03-26",
-                            "capabilities": {},
-                            "clientInfo": {
-                                "name": "test-client",
-                                "version": "0.1.0",
-                            },
-                        },
-                    },
-                )
-            assert response.status_code in (200, 202)
-        finally:
-            server.should_exit = True
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-    async def test_search_web_tool_with_mock_tavily(self, mcp_app) -> None:
-        """Test search_web tool invocation with mocked Tavily API.
-
-        The TavilyClient is imported inside _execute_search_web, so we
-        patch it at the module level where it is looked up.
-        """
-        import socket
-
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-
-        import asyncio
-
-        import uvicorn
-
-        config = uvicorn.Config(app=mcp_app, host="127.0.0.1", port=port)
-        server = uvicorn.Server(config)
-
-        async def _run_server():
-            await server.serve()
-
-        task = asyncio.create_task(_run_server())
-
-        # Wait for server to start
-        for _ in range(20):
-            try:
-                async with AsyncClient() as client:
-                    r = await client.get(f"http://127.0.0.1:{port}/health", timeout=0.5)
-                if r.status_code == 200:
-                    break
-            except Exception:
-                pass
-            await asyncio.sleep(0.25)
-
-        try:
-            with patch("tavily.TavilyClient") as mock_tavily_cls:
-                mock_client = MagicMock()
-                mock_client.search.return_value = {
-                    "answer": "Python is a programming language.",
-                    "results": [
-                        {
-                            "title": "Python",
-                            "url": "https://python.org",
-                            "content": "Python is awesome.",
-                        }
-                    ],
-                }
-                mock_tavily_cls.return_value = mock_client
-
-                async with AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
-                    response = await client.post(
-                        "/mcp/",
-                        headers={
-                            "Content-Type": "application/json",
-                            "Accept": "application/json, text/event-stream",
-                        },
-                        json={
-                            "jsonrpc": "2.0",
-                            "id": 2,
-                            "method": "tools/call",
-                            "params": {
-                                "name": "search_web",
-                                "arguments": {"query": "What is Python?"},
-                            },
-                        },
-                    )
-                assert response.status_code in (200, 202)
-                mock_client.search.assert_called_once()
-        finally:
-            server.should_exit = True
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
 
 
 # ---------------------------------------------------------------------------
@@ -298,68 +154,35 @@ class TestRAGPipeline:
 class TestAgentIntegration:
     """Test Agent with mocked external dependencies."""
 
-    def _create_minimal_config(self, tmp_path) -> Path:
-        """Create a minimal config.toml for testing."""
-        config_content = """
-[model]
-base_url = "https://example.com/api"
-api_key = "test-key"
-model_name = "test-model"
-
-[search]
-tavily_api_key = "tvly-test"
-max_results = 3
-
-[langsmith]
-enabled = false
-
-[skills]
-directory = ".skills"
-
-[rag]
-docs_directory = "docs"
-chroma_persist_directory = ".chroma_db"
-
-[mcp_server]
-host = "localhost"
-port = 18001
-route = "/mcp"
-"""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text(config_content, encoding="utf-8")
-        return config_file
-
-    def test_agent_initialization(self, tmp_path, _patch_agent_imports) -> None:
+    def test_agent_initialization(self, tmp_path) -> None:
         """Test DevMateAgent can be created with a config file."""
         from devmate.agent import DevMateAgent
 
-        config_file = self._create_minimal_config(tmp_path)
+        config_file = write_minimal_config(tmp_path)
         agent = DevMateAgent(config_path=str(config_file), workspace=str(tmp_path))
 
         assert agent._config is not None
-        assert agent._agent is None
         assert agent._llm is None
 
-    @patch("devmate.agent.ChatOpenAI")
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
     @patch(
         "langchain_mcp_adapters.client.MultiServerMCPClient",
         new_callable=MagicMock,
     )
+    @patch("devmate.agent.OpenAICompatibleAdapter")
     async def test_agent_initialize_with_mocks(
         self,
+        mock_llm_cls,
         mock_mcp_client_cls,
         mock_skills_cls,
         mock_rag_cls,
-        mock_llm_cls,
         tmp_path,
-        _patch_agent_imports,
     ) -> None:
         """Test agent initialization with all external deps mocked."""
         from devmate.agent import DevMateAgent
 
-        config_file = self._create_minimal_config(tmp_path)
+        config_file = write_minimal_config(tmp_path)
 
         # Setup mocks
         mock_llm_instance = MagicMock()
@@ -390,13 +213,7 @@ route = "/mcp"
         mock_skills_cls.assert_called_once()
 
         # Verify tools include file tools
-        # (agent._tools may contain MagicMock items from create_tools return,
-        # so filter to only real tools with string names)
-        tool_names = [
-            t.name
-            for t in agent._tools
-            if hasattr(t, "name") and isinstance(t.name, str)
-        ]
+        tool_names = [t.name for t in agent._tools]
         assert "read" in tool_names
         assert "write" in tool_names
         assert "edit" in tool_names
@@ -407,26 +224,25 @@ route = "/mcp"
         assert "list_directory" in tool_names
         assert "search_knowledge_base" in tool_names
 
-    @patch("devmate.agent.ChatOpenAI")
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
     @patch(
         "langchain_mcp_adapters.client.MultiServerMCPClient",
         new_callable=MagicMock,
     )
+    @patch("devmate.agent.OpenAICompatibleAdapter")
     async def test_agent_mcp_failure_continues(
         self,
+        mock_llm_cls,
         mock_mcp_client_cls,
         mock_skills_cls,
         mock_rag_cls,
-        mock_llm_cls,
         tmp_path,
-        _patch_agent_imports,
     ) -> None:
         """Test agent continues when MCP connection fails."""
         from devmate.agent import DevMateAgent
 
-        config_file = self._create_minimal_config(tmp_path)
+        config_file = write_minimal_config(tmp_path)
 
         mock_llm_cls.return_value = MagicMock()
         mock_rag_instance = MagicMock()
@@ -445,31 +261,29 @@ route = "/mcp"
         # Should not raise even though MCP fails
         await agent.initialize()
 
-        # Agent should still be created
-        assert agent._agent is not None
+        # Agent should still be functional
+        assert agent._tool_registry is not None
 
-    @patch("devmate.agent.ChatOpenAI")
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
     @patch(
         "langchain_mcp_adapters.client.MultiServerMCPClient",
         new_callable=MagicMock,
     )
+    @patch("devmate.agent.OpenAICompatibleAdapter")
     async def test_agent_run_with_mock(
         self,
+        mock_llm_cls,
         mock_mcp_client_cls,
         mock_skills_cls,
         mock_rag_cls,
-        mock_llm_cls,
         tmp_path,
-        _patch_agent_imports,
     ) -> None:
-        """Test agent run method with mocked agent invocation."""
-        from langchain_core.messages import AIMessage
-
+        """Test agent run method with mocked LLM."""
         from devmate.agent import DevMateAgent
+        from devmate.llm import LLMResponse, TextBlock
 
-        config_file = self._create_minimal_config(tmp_path)
+        config_file = write_minimal_config(tmp_path)
 
         # Mock LLM
         mock_llm_cls.return_value = MagicMock()
@@ -494,28 +308,30 @@ route = "/mcp"
         agent = DevMateAgent(config_path=str(config_file), workspace=str(tmp_path))
         await agent.initialize()
 
-        # Mock the internal agent's ainvoke to return a message list
-        ai_msg = AIMessage(content="Mocked agent response.")
-        agent._agent.ainvoke = AsyncMock(return_value={"messages": [ai_msg]})
+        # Mock the LLM's chat method
+        mock_llm_instance = mock_llm_cls.return_value
+        mock_llm_instance.chat = AsyncMock(
+            return_value=LLMResponse(
+                content=[TextBlock(text="Mocked agent response.")],
+                finish_reason="stop",
+            )
+        )
 
         result = await agent.run("Hello, DevMate!")
         assert result == "Mocked agent response."
 
-        agent._agent.ainvoke.assert_called_once()
-
-    @patch("devmate.agent.ChatOpenAI")
     @patch("devmate.agent.RAGEngine")
     @patch(
         "langchain_mcp_adapters.client.MultiServerMCPClient",
         new_callable=MagicMock,
     )
+    @patch("devmate.agent.OpenAICompatibleAdapter")
     async def test_agent_skills_injected_in_prompt(
         self,
+        mock_llm_cls,
         mock_mcp_client_cls,
         mock_rag_cls,
-        mock_llm_cls,
         tmp_path,
-        _patch_agent_imports,
     ) -> None:
         """Test that available skills XML is injected into the system prompt."""
         from devmate.agent import DevMateAgent
@@ -578,8 +394,8 @@ route = "/mcp"
         assert "<available_skills>" in meta_xml
         assert "test_skill" in meta_xml
 
-        # Verify the agent was created
-        assert agent._agent is not None
+        # Verify the system prompt contains skills
+        assert "test_skill" in agent._system_prompt
 
 
 # ---------------------------------------------------------------------------

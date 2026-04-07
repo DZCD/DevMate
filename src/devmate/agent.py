@@ -1,16 +1,19 @@
 """Agent core module for DevMate.
 
-Creates an agent with MCP tools, RAG retrieval, file operations,
-and skills integration. Uses LangChain with DeepSeek LLM via OpenAI-compatible API.
+Implements a custom tool loop (no LangGraph/LangChain agent dependency).
+Follows the architecture of agent-template-ts/src/agent/createAgent.ts.
+
+Core design:
+- Self-built tool loop: messages -> LLM chat -> check tool_calls -> execute
+  tools -> append tool_result -> continue loop
+- Storage layer for conversation memory (FileStorage with local JSON files)
+- LLM abstraction via OpenAI-compatible adapter (DeepSeek)
+- Tool registry and executor wrapping existing @tool functions
 """
 
 import asyncio
 import logging
-
-from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
-from langchain_core.tools import BaseTool
-from langchain_openai import ChatOpenAI
+from typing import Any
 
 from devmate.config import (
     get_model_config,
@@ -19,117 +22,81 @@ from devmate.config import (
     load_config,
 )
 from devmate.file_tools import create_file_tools
+from devmate.llm import LLMToolDef, OpenAICompatibleAdapter  # noqa: E501
 from devmate.rag import RAGEngine, create_search_tool
 from devmate.skills import SkillsManager
+from devmate.storage import (
+    ContentBlock,
+    Message,
+    Storage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    add_message,
+    assistant_message,
+    create_storage,
+    get_beijing_date,
+    get_messages,
+    tool_result,
+    user_message,
+)
+from devmate.tools import (
+    Tool,
+    ToolExecutor,
+    ToolRegistry,
+    langchain_tool_to_tool,
+    tools_to_llm_defs,
+)
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are DevMate, an AI-powered development assistant. You help
-developers with coding tasks, documentation, debugging, and project management.
+# ---------------------------------------------------------------------------
+# System Prompt (aligned with TS template)
+# ---------------------------------------------------------------------------
 
-## Your Capabilities
+_SYSTEM_PROMPT_TEMPLATE = """\
+You are an interactive tool that helps users with tasks. Use the instructions below and the tools available to you to assist the user.
 
-1. **Web Search** (search_web): Search the internet for current information,
-   documentation, and solutions. Use this when you need up-to-date information
-   or when the user asks about recent events, new libraries, or APIs.
+<Professional objectivity>
+Prioritize technical accuracy and truthfulness over validating the user's beliefs. Focus on facts and problem-solving, providing direct, objective technical info without any unnecessary superlatives, praise, or emotional validation. It is best for the user if Claude honestly applies the same rigorous standards to all ideas and disagrees when necessary, even if it may not be what the user wants to hear. Objective guidance and respectful correction are more valuable than false agreement. Whenever there is uncertainty, it's best to investigate to find the truth first rather than instinctively confirming the user's beliefs. Avoid using over-the-top validation or excessive praise when responding to users such as "You're absolutely right" or similar phrases.
+</Professional objectivity>
 
-2. **Knowledge Base** (search_knowledge_base): Search the local knowledge base
-   for internal documentation, coding guidelines, and project-specific information.
-   Use this to find internal standards, architecture decisions, and best practices.
+<Task Management>
+You have access to the task tools to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
+These tools are also EXTREMELY helpful for planning tasks, and for breaking down larger complex tasks into smaller steps. If you do not use this tool when planning, you may forget to do important tasks - and that is unacceptable.
+It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
+</Task Management>
 
-3. **Skills**: Access reusable knowledge patterns and code templates.
-   - `skill(name)`: Load a skill's full instruction content by exact name.
-   - `save_skill(name, description, content)`: Create a new skill.
-   - `query_skills(query)`: Search skills by keyword (legacy).
+<Doing tasks>
+# Doing tasks
+The user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:
+- Use the Task tool to plan the task if required
+- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are automatically added by the system, and bear no direct relation to the specific tool results or user messages in which they appear.
+</Doing tasks>
 
-4. **File Operations**:
-   - `read(file_path, offset=0, limit=2000)`: Read file contents with line
-     numbers. Detects binary and image files. Supports offset/limit for
-     pagination on long files.
-   - `write(file_path, content)`: Create or overwrite files. Produces a
-     unified diff when overwriting. Parent directories are created
-     automatically.
-   - `edit(file_path, old_string, new_string, replace_all=False)`: Fuzzy
-     string replacement with an 8-strategy chain (exact, line-trimmed,
-     block-anchor, whitespace-normalized, indentation-flexible,
-     escape-normalized, trimmed-boundary, context-aware). Replaces a single
-     unique match by default; set `replace_all=True` to replace every
-     occurrence. When `old_string` is empty and the file does not exist,
-     creates a new file.
-   - `glob(pattern, path=None)`: Fast filename pattern matching using glob
-     syntax (e.g. `**/*.py`). Returns matches sorted by mtime (newest first).
-   - `grep(pattern, path=None, include=None)`: Regex content search across
-     files. Filter by extension with `include` (e.g. `*.py`, `*.{ts,tsx}`).
-     Returns file paths and line numbers sorted by mtime.
-   - `bash(command, cwd=None, timeout=30000)`: Execute shell commands with
-     configurable timeout (milliseconds). Supports arbitrary shell commands
-     (ls, git, npm, pip, etc.).
-   - `codesearch(query, tokens_num=5000)`: Search the internet for
-     programming context via Exa Code API (MCP protocol). Returns code
-     examples, documentation, and API references. Token count adjustable
-     from 1000 to 50000.
-   - `webfetch(url, max_chars=50000)`: Fetch a web page by URL and extract
-     readable text from HTML. Respects a 30-second timeout.
-   - `create_file` (deprecated): Use `write` instead.
-   - `list_directory` (deprecated): Use `bash` with `ls` instead.
+<Tool usage policy>
+- When doing file search, prefer to use the Task tool in order to reduce context usage.
+- When WebFetch returns a message about a redirect to a different host, you should immediately make a new WebFetch request with the redirect URL provided in the response.
+- You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead. Never use placeholders or guess missing parameters in tool calls.
+- Use specialized tools instead of bash commands when possible, as this provides a better user experience. For file operations, use dedicated tools: Read for reading files instead of cat/head/tail, Edit for editing instead of sed/awk, and Write for creating files instead of cat with heredoc or echo redirection. Reserve bash tools exclusively for actual system commands and terminal operations that require shell execution. NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
+- VERY IMPORTANT: When exploring the codebase to gather context or to answer a question that is not a needle query for a specific file/class/function, it is CRITICAL that you use the Task tool instead of running search commands directly.
+- send_message tool is your only way to communicate with the user. You MUST call it at least once per interaction, otherwise the user will not receive your response.
+</Tool usage policy>
 
-## Decision Framework
+<Workspace>
+Your default working directory is: {workspace_path}
+When you need to create files, write documents, generate reports, etc., please place them in this directory (or subdirectories) by default, rather than in the code repository directory.
+You can freely read and write files at any path on the system. This workspace is only a suggested default output directory.
+</Workspace>
 
-When a user asks a question or gives a task:
-1. First, check the knowledge base for relevant internal documentation.
-2. If the knowledge base doesn't have sufficient information, search the web.
-3. Use the `skill` tool to load relevant skill instructions when applicable.
-4. Use file tools (`read`, `write`, `edit`, `glob`, `grep`, `bash`) to
-   explore and modify code as needed.
-5. Use `codesearch` when you need up-to-date API / library documentation.
-6. Use `webfetch` to retrieve specific web page content by URL.
-
-## Skill Usage Guide
-
-Skills are reusable instruction sets stored as markdown files. Each skill
-contains detailed guidance for specific tasks or patterns.
-
-To use a skill:
-1. Review the available skills listed below.
-2. Call `skill(name)` with the exact skill name to load its full instructions.
-3. Follow the instructions provided by the skill to complete the task.
-
-To create a new skill:
-1. Call `save_skill(name, description, content)` with the skill details.
-2. The skill will be saved and immediately available.
-
-## Response Guidelines
-
-- Be concise and actionable in your responses.
-- Always provide working code when asked to generate code.
-- Explain your reasoning when making decisions.
-- If you're unsure about something, say so rather than guessing.
-- Follow the coding standards found in the knowledge base.
-- When creating files, use proper project structure.
-
-## Important Notes
-
-- Always use tools when relevant rather than answering from memory.
-- When searching, use specific and targeted queries.
-- When writing code, follow PEP 8 and project conventions.
-- Never use print() statements - use logging instead."""
-
-SKILL_USAGE_SECTION = """
-
-## Available Skills
-
-Below is the list of skills currently available. Use the `skill` tool
-with the exact name to load detailed instructions.
-
-{available_skills}
-
-When you need guidance for a specific task, check if a relevant skill
-exists and load it using `skill(name)`.
-"""
+{skills_section}"""
 
 
 class DevMateAgent:
-    """The main DevMate agent."""
+    """The main DevMate agent with a custom tool loop.
+
+    Follows the architecture of agent-template-ts/src/agent/createAgent.ts.
+    """
 
     def __init__(
         self,
@@ -144,30 +111,38 @@ class DevMateAgent:
         """
         self._config = load_config(config_path)
         self._workspace = workspace
-        self._llm = None
-        self._agent = None
+        self._llm: OpenAICompatibleAdapter | None = None
+        self._storage: Storage[Any] | None = None
         self._rag_engine: RAGEngine | None = None
         self._skills_manager: SkillsManager | None = None
-        self._tools: list[BaseTool] = []
-        self._mcp_tools: list[BaseTool] = []
+        self._tool_registry: ToolRegistry | None = None
+        self._tool_executor: ToolExecutor | None = None
+        self._tools: list[Tool] = []
+        self._llm_tool_defs: list[LLMToolDef] = []
+        self._system_prompt: str = ""
+        self._max_iterations: int = 50
         logger.info("DevMate agent initialized")
 
     async def initialize(self) -> None:
-        """Set up all components: LLM, tools, RAG, skills, MCP."""
+        """Set up all components: LLM, storage, tools, RAG, skills."""
         logger.info("Initializing DevMate agent components...")
 
-        # Initialize LLM
+        # 1. Initialize LLM (OpenAI-compatible adapter for DeepSeek)
         model_config = get_model_config(self._config)
-        self._llm = ChatOpenAI(
-            base_url=model_config.get("base_url"),
-            api_key=model_config.get("api_key"),
+        self._llm = OpenAICompatibleAdapter(
+            api_key=model_config.get("api_key", ""),
+            base_url=model_config.get("base_url", "https://api.deepseek.com"),
             model=model_config.get("model_name", "deepseek-chat"),
             temperature=model_config.get("temperature", 0.7),
-            max_tokens=model_config.get("max_tokens", 4096),
+            max_tokens=model_config.get("max_tokens", 8192),
         )
         logger.info("LLM initialized: %s", model_config.get("model_name"))
 
-        # Initialize RAG (skip embedding API if provider doesn't support it)
+        # 2. Initialize Storage (FileStorage with local JSON files)
+        self._storage = create_storage()
+        logger.info("Storage initialized")
+
+        # 3. Initialize RAG
         rag_config = get_rag_config(self._config)
         embedding_api_key = model_config.get("api_key")
         embedding_api_base = model_config.get("base_url")
@@ -198,7 +173,7 @@ class DevMateAgent:
                 chunk_overlap=rag_config.get("chunk_overlap", 200),
             )
 
-        # Initialize Skills
+        # 4. Initialize Skills
         skills_config = get_skills_config(self._config)
         self._skills_manager = SkillsManager(
             skills_dir=skills_config.get("directory", ".skills")
@@ -206,26 +181,36 @@ class DevMateAgent:
         skills_count = self._skills_manager.load_skills()
         logger.info("Skills loaded: %d", skills_count)
 
-        # Build tool list
-        self._tools = []
-        self._tools.extend(create_file_tools(self._workspace))
-        self._tools.append(create_search_tool(self._rag_engine))
-        self._tools.extend(self._skills_manager.create_tools())
+        # 5. Build tool list using ToolRegistry
+        self._tool_registry = ToolRegistry()
+        file_tools = create_file_tools(self._workspace)
+        for lc_tool in file_tools:
+            self._tool_registry.register(langchain_tool_to_tool(lc_tool))
 
-        # Connect to MCP server for search tools
+        if self._rag_engine:
+            search_tool = create_search_tool(self._rag_engine)
+            self._tool_registry.register(langchain_tool_to_tool(search_tool))
+
+        skill_tools = (
+            self._skills_manager.create_tools() if self._skills_manager else []
+        )
+        for lc_tool in skill_tools:
+            self._tool_registry.register(langchain_tool_to_tool(lc_tool))
+
+        self._tools = self._tool_registry.get_all()
+        self._tool_executor = ToolExecutor(self._tool_registry)
+        self._llm_tool_defs = tools_to_llm_defs(self._tools)
+        logger.info("Tools registered: %d", len(self._tools))
+
+        # 6. Connect to MCP server for additional tools
         await self._connect_mcp()
 
-        # Create the agent
-        self._create_agent()
+        # 7. Build system prompt
+        self._build_system_prompt()
         logger.info("DevMate agent fully initialized")
 
     async def _connect_mcp(self) -> None:
-        """Connect to MCP server and retrieve tools.
-
-        Uses the langchain-mcp-adapters v0.2+ API where MultiServerMCPClient
-        is NOT a context manager. Instead, call ``await client.get_tools()``
-        directly — it creates a fresh session per invocation internally.
-        """
+        """Connect to MCP server and retrieve additional tools."""
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
 
@@ -248,15 +233,22 @@ class DevMateAgent:
                 route,
             )
 
-            self._mcp_client = MultiServerMCPClient(connections=connections)
-            mcp_tools = await self._mcp_client.get_tools()
+            mcp_client = MultiServerMCPClient(connections=connections)
+            mcp_tools = await mcp_client.get_tools()
 
             if mcp_tools:
-                self._tools.extend(mcp_tools)
-                self._mcp_tools = mcp_tools
+                for lc_tool in mcp_tools:
+                    try:
+                        self._tool_registry.register(langchain_tool_to_tool(lc_tool))
+                    except ValueError:
+                        logger.debug(
+                            "MCP tool already registered, skipping: %s", lc_tool.name
+                        )
+                self._tools = self._tool_registry.get_all()
+                self._llm_tool_defs = tools_to_llm_defs(self._tools)
                 logger.info(
-                    "Connected to MCP server, got %d tools",
-                    len(mcp_tools),
+                    "Connected to MCP server, total tools: %d",
+                    len(self._tools),
                 )
             else:
                 logger.warning(
@@ -268,82 +260,191 @@ class DevMateAgent:
                 "Failed to connect to MCP server: %s. Continuing without MCP tools.",
                 exc,
             )
-            self._mcp_client = None
 
-    def _create_agent(self) -> None:
-        """Create the agent with all tools using langchain create_agent."""
-        tool_names = ", ".join(t.name for t in self._tools)
-        tool_descriptions = "\n".join(
-            f"- {t.name}: {t.description}" for t in self._tools
+    def _build_system_prompt(self) -> None:
+        """Build the full system prompt with skills section."""
+        import os
+
+        workspace_path = self._workspace or os.path.join(
+            os.path.expanduser("~"), ".duclaw", "workspace"
         )
 
-        # Inject available skills into system prompt
-        skill_meta = ""
-        if self._skills_manager is not None:
+        skills_section = ""
+        if self._skills_manager:
             skill_meta = self._skills_manager.get_skill_meta()
+            if skill_meta:
+                skills_section = (
+                    f"\n<Available Skills>\n{skill_meta}\n</Available Skills>\n"
+                )
 
-        skill_section = ""
-        if skill_meta:
-            skill_section = SKILL_USAGE_SECTION.format(available_skills=skill_meta)
-
-        system_prompt = (
-            SYSTEM_PROMPT
-            + skill_section
-            + "\n\n## Available Tools\n\n"
-            + tool_names
-            + "\n\n"
-            + tool_descriptions
+        self._system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
+            workspace_path=workspace_path,
+            skills_section=skills_section,
         )
 
-        self._agent = create_agent(
-            model=self._llm,
-            tools=self._tools,
-            system_prompt=system_prompt,
-        )
-        logger.info("Agent created with %d tools", len(self._tools))
+    async def run(self, prompt: str, user_id: str = "default") -> str:
+        """Run the agent with a given prompt using the custom tool loop.
 
-    async def run(self, prompt: str) -> str:
-        """Run the agent with a given prompt.
+        This is the core tool loop, following the TS template pattern:
+        1. Add user message to storage
+        2. While loop: get_messages -> llm.chat -> check tool_calls ->
+           execute tools -> add_message(tool_results) -> continue or return
 
         Args:
             prompt: The user prompt to process.
+            user_id: The user identifier for conversation isolation.
 
         Returns:
-            The agent's response.
+            The agent's final text response.
         """
-        if self._agent is None:
+        if self._llm is None:
             await self.initialize()
 
-        logger.info("Running agent with prompt: %s", prompt[:100])
+        logger.info("Running agent with prompt: %s (user=%s)", prompt[:100], user_id)
 
         try:
-            result = await self._agent.ainvoke(
-                {"messages": [HumanMessage(content=prompt)]}
-            )
-            # Extract the last AI message content from the response
-            messages = result.get("messages", [])
-            output = ""
-            for msg in reversed(messages):
-                if hasattr(msg, "content") and msg.type == "ai":
-                    output = msg.content
+            # 1. Get current date for storage key isolation
+            date = get_beijing_date()
+
+            # 2. Add user message to storage
+            await add_message(self._storage, user_id, user_message(prompt), date)
+
+            # 3. Tool loop
+            iterations = 0
+            while iterations < self._max_iterations:
+                iterations += 1
+                logger.debug(
+                    "Tool loop iteration %d/%d", iterations, self._max_iterations
+                )
+
+                # 3.1 Load message history
+                messages = await get_messages(
+                    self._storage, user_id, limit=100, date=date
+                )
+
+                if not messages:
+                    logger.warning("No messages loaded for user %s", user_id)
                     break
-            if not output:
-                output = "No output generated."
-            logger.info("Agent response received (%d chars)", len(output))
-            return output
+
+                # 3.2 Call LLM
+                response = await self._llm.chat(
+                    messages=messages,
+                    system_prompt=self._system_prompt,
+                    tools=self._llm_tool_defs,
+                )
+
+                # 3.3 Check for max_tokens truncation
+                if response.finish_reason == "length":
+                    truncated_tool_uses = [
+                        b for b in response.content if isinstance(b, ToolUseBlock)
+                    ]
+                    if truncated_tool_uses:
+                        # Skip truncated tool calls, warn the LLM
+                        text_content = (
+                            "\n".join(
+                                b.text
+                                for b in response.content
+                                if isinstance(b, TextBlock)
+                            )
+                            or "(output truncated)"
+                        )
+                        await add_message(
+                            self._storage,
+                            user_id,
+                            assistant_message(TextBlock(text=text_content)),
+                            date,
+                        )
+                        await add_message(
+                            self._storage,
+                            user_id,
+                            user_message(
+                                "<system-warning>Your output was truncated due to max_tokens limit. "
+                                "Tool call parameters are incomplete and have been skipped. "
+                                "Please reduce output per turn: output text first, then call tools "
+                                "separately.</system-warning>"
+                            ),
+                            date,
+                        )
+                        continue
+
+                # 3.4 Check for tool calls
+                tool_calls = response.tool_calls
+                if tool_calls:
+                    # Add assistant message (with tool_use blocks) to storage
+                    assistant_blocks: list[ContentBlock] = []
+                    for block in response.content:
+                        assistant_blocks.append(block)
+                    await add_message(
+                        self._storage,
+                        user_id,
+                        Message(role="assistant", content=assistant_blocks),
+                        date,
+                    )
+
+                    # Execute all tools concurrently
+                    tool_results: list[ToolResultBlock] = []
+                    for tc in tool_calls:
+                        try:
+                            result = await self._tool_executor.execute(
+                                tc.name, tc.arguments
+                            )
+                            tool_results.append(tool_result(tc.id, result))
+                        except Exception as exc:
+                            logger.error("Tool %s execution error: %s", tc.name, exc)
+                            tool_results.append(
+                                tool_result(tc.id, f"Tool [{tc.name}] error: {exc}")
+                            )
+
+                    # Add tool results as a single user message
+                    if tool_results:
+                        await add_message(
+                            self._storage,
+                            user_id,
+                            Message(role="user", content=tool_results),
+                            date,
+                        )
+
+                    continue  # Continue the loop for LLM to process tool results
+
+                # 3.5 No tool calls - extract text response and return
+                text_blocks = [b for b in response.content if isinstance(b, TextBlock)]
+                if text_blocks:
+                    final_text = "\n".join(b.text for b in text_blocks)
+                    # Save the final assistant response to storage
+                    await add_message(
+                        self._storage,
+                        user_id,
+                        assistant_message(TextBlock(text=final_text)),
+                        date,
+                    )
+                    logger.info(
+                        "Agent response received (%d chars, %d iterations)",
+                        len(final_text),
+                        iterations,
+                    )
+                    return final_text
+
+                # No content at all
+                logger.warning(
+                    "Agent produced no content after %d iterations", iterations
+                )
+                return "No response generated."
+
+            logger.warning("Agent reached max iterations (%d)", self._max_iterations)
+            return f"Reached maximum iterations ({self._max_iterations}). Please try a simpler request."
+
         except Exception as exc:
             logger.error("Agent execution failed: %s", exc, exc_info=True)
             return f"Error: Agent execution failed - {exc}"
 
     async def chat_loop(self) -> None:
-        """Start an interactive chat loop."""
-
+        """Start an interactive chat loop with conversation memory."""
         await self.initialize()
-        logger.info("Starting interactive chat session...")
+        user_id = "interactive"
+        logger.info("Starting interactive chat session (user=%s)...", user_id)
 
         while True:
             try:
-                # Use asyncio-compatible input
                 loop = asyncio.get_event_loop()
                 user_input = await loop.run_in_executor(None, input, "\nYou: ")
             except (EOFError, KeyboardInterrupt):
@@ -357,17 +458,11 @@ class DevMateAgent:
                 logger.info("Chat session ended by user")
                 break
 
-            response = await self.run(user_input)
-            # Use logging instead of print for the response
+            response = await self.run(user_input, user_id=user_id)
             logger.info("Agent: %s", response)
 
     async def cleanup(self) -> None:
-        """Clean up resources.
-
-        MultiServerMCPClient (v0.2+) is not a context manager and has no
-        explicit close method — sessions are created and torn down per tool
-        call, so no cleanup is needed.
-        """
+        """Clean up resources."""
         logger.info("Agent cleanup complete")
 
 
@@ -379,7 +474,7 @@ def create_agent_func(
 
     Args:
         config_path: Path to the config file.
-        workspace: The workspace directory.
+        workspace: Workspace directory path.
 
     Returns:
         A DevMateAgent instance.
