@@ -9,7 +9,7 @@ import logging
 
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 
 from devmate.config import (
