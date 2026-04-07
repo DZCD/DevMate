@@ -1,16 +1,16 @@
 """Agent core module for DevMate.
 
 Creates an agent with MCP tools, RAG retrieval, file operations,
-and skills integration. Uses LangChain with Anthropic-compatible LLM.
+and skills integration. Uses LangChain with DeepSeek LLM via OpenAI-compatible API.
 """
 
 import asyncio
 import logging
 
 from langchain.agents import create_agent
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
+from langchain_openai import ChatOpenAI
 
 from devmate.config import (
     get_model_config,
@@ -101,26 +101,45 @@ class DevMateAgent:
 
         # Initialize LLM
         model_config = get_model_config(self._config)
-        self._llm = ChatAnthropic(
+        self._llm = ChatOpenAI(
             base_url=model_config.get("base_url"),
             api_key=model_config.get("api_key"),
-            model_name=model_config.get("model_name", "glm-5-turbo"),
+            model=model_config.get("model_name", "deepseek-chat"),
             temperature=model_config.get("temperature", 0.7),
             max_tokens=model_config.get("max_tokens", 4096),
         )
         logger.info("LLM initialized: %s", model_config.get("model_name"))
 
-        # Initialize RAG
+        # Initialize RAG (skip embedding API if provider doesn't support it)
         rag_config = get_rag_config(self._config)
-        self._rag_engine = RAGEngine(
-            persist_directory=rag_config.get("chroma_persist_directory", ".chroma_db"),
-            chunk_size=rag_config.get("chunk_size", 1000),
-            chunk_overlap=rag_config.get("chunk_overlap", 200),
-        )
-        # Ingest documents
+        embedding_api_key = model_config.get("api_key")
+        embedding_api_base = model_config.get("base_url")
         docs_dir = rag_config.get("docs_directory", "docs")
-        count = self._rag_engine.ingest_documents(docs_dir)
-        logger.info("RAG engine ready (%d chunks indexed)", count)
+        persist_dir = rag_config.get("chroma_persist_directory", ".chroma_db")
+
+        try:
+            self._rag_engine = RAGEngine(
+                persist_directory=persist_dir,
+                chunk_size=rag_config.get("chunk_size", 1000),
+                chunk_overlap=rag_config.get("chunk_overlap", 200),
+                embedding_model_name=model_config.get(
+                    "embedding_model_name", "text-embedding-3-small"
+                ),
+                openai_api_key=embedding_api_key,
+                openai_api_base=embedding_api_base,
+            )
+            count = self._rag_engine.ingest_documents(docs_dir)
+            logger.info("RAG engine ready (%d chunks indexed)", count)
+        except Exception as exc:
+            logger.warning(
+                "RAG init failed (no embedding API?), continuing without RAG: %s",
+                exc,
+            )
+            self._rag_engine = RAGEngine(
+                persist_directory=persist_dir,
+                chunk_size=rag_config.get("chunk_size", 1000),
+                chunk_overlap=rag_config.get("chunk_overlap", 200),
+            )
 
         # Initialize Skills
         skills_config = get_skills_config(self._config)

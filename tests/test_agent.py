@@ -68,7 +68,7 @@ route = "/mcp"
         config_path = self._create_minimal_config(tmp_path)
 
         with (
-            patch("devmate.agent.ChatAnthropic") as mock_llm_cls,
+            patch("devmate.agent.ChatOpenAI") as mock_llm_cls,
             patch("devmate.agent.RAGEngine") as mock_rag_cls,
             patch("devmate.agent.SkillsManager") as mock_skills_cls,
             patch(
@@ -108,7 +108,7 @@ route = "/mcp"
         config_path = self._create_minimal_config(tmp_path)
 
         with (
-            patch("devmate.agent.ChatAnthropic"),
+            patch("devmate.agent.ChatOpenAI"),
             patch("devmate.agent.RAGEngine") as mock_rag_cls,
             patch("devmate.agent.SkillsManager") as mock_skills_cls,
             patch(
@@ -140,7 +140,7 @@ route = "/mcp"
         config_path = self._create_minimal_config(tmp_path)
 
         with (
-            patch("devmate.agent.ChatAnthropic"),
+            patch("devmate.agent.ChatOpenAI"),
             patch("devmate.agent.RAGEngine") as mock_rag_cls,
             patch("devmate.agent.SkillsManager") as mock_skills_cls,
             patch(
@@ -174,7 +174,7 @@ route = "/mcp"
         config_path = self._create_minimal_config(tmp_path)
 
         with (
-            patch("devmate.agent.ChatAnthropic"),
+            patch("devmate.agent.ChatOpenAI"),
             patch("devmate.agent.RAGEngine") as mock_rag_cls,
             patch("devmate.agent.SkillsManager") as mock_skills_cls,
             patch(

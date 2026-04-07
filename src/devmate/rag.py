@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from langchain_core.documents import Document
 from langchain_core.tools import tool
 from langchain_text_splitters import (
@@ -27,6 +28,9 @@ class RAGEngine:
         collection_name: str = "devmate_docs",
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
+        embedding_model_name: str = "text-embedding-3-small",
+        openai_api_key: str | None = None,
+        openai_api_base: str | None = None,
     ) -> None:
         """Initialize the RAG engine.
 
@@ -35,13 +39,35 @@ class RAGEngine:
             collection_name: Name of the ChromaDB collection.
             chunk_size: Size of document chunks.
             chunk_overlap: Overlap between document chunks.
+            embedding_model_name: Name of the OpenAI embedding model.
+            openai_api_key: API key for the OpenAI-compatible embedding service.
+            openai_api_base: Base URL for the OpenAI-compatible embedding service.
         """
         self._persist_directory = persist_directory
         self._collection_name = collection_name
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
+        self._embedding_model_name = embedding_model_name
+
         self._client = chromadb.PersistentClient(path=persist_directory)
-        self._collection = self._client.get_or_create_collection(name=collection_name)
+
+        # Set up embedding function for ChromaDB when API credentials are provided
+        if openai_api_key:
+            embedding_kwargs: dict[str, Any] = {
+                "model_name": embedding_model_name,
+                "api_key": openai_api_key,
+            }
+            if openai_api_base:
+                embedding_kwargs["api_base"] = openai_api_base
+            embedding_function = OpenAIEmbeddingFunction(**embedding_kwargs)
+            self._collection = self._client.get_or_create_collection(
+                name=collection_name,
+                embedding_function=embedding_function,
+            )
+        else:
+            self._collection = self._client.get_or_create_collection(
+                name=collection_name,
+            )
         logger.info(
             "RAG engine initialized (collection=%s, persist_dir=%s)",
             collection_name,

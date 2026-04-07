@@ -340,7 +340,7 @@ route = "/mcp"
         assert agent._agent is None
         assert agent._llm is None
 
-    @patch("devmate.agent.ChatAnthropic")
+    @patch("devmate.agent.ChatOpenAI")
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
     @patch(
@@ -395,7 +395,7 @@ route = "/mcp"
         assert "list_directory" in tool_names
         assert "search_knowledge_base" in tool_names
 
-    @patch("devmate.agent.ChatAnthropic")
+    @patch("devmate.agent.ChatOpenAI")
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
     @patch(
@@ -435,7 +435,7 @@ route = "/mcp"
         # Agent should still be created
         assert agent._agent is not None
 
-    @patch("devmate.agent.ChatAnthropic")
+    @patch("devmate.agent.ChatOpenAI")
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
     @patch(
