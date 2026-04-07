@@ -113,19 +113,21 @@ class OpenAICompatibleAdapter(LLMClient):
                 if isinstance(msg.content, str):
                     openai_messages.append({"role": "user", "content": msg.content})
                 elif isinstance(msg.content, list):
-                    parts: list[dict[str, Any]] = []
+                    text_parts: list[dict[str, Any]] = []
                     for block in msg.content:
                         if isinstance(block, TextBlock):
-                            parts.append({"type": "text", "text": block.text})
+                            text_parts.append({"type": "text", "text": block.text})
                         elif isinstance(block, ToolResultBlock):
-                            parts.append(
+                            # OpenAI format: separate message with role="tool"
+                            openai_messages.append(
                                 {
-                                    "type": "tool_result",
-                                    "tool_use_id": block.tool_use_id,
+                                    "role": "tool",
+                                    "tool_call_id": block.tool_use_id,
                                     "content": block.content,
                                 }
                             )
-                    openai_messages.append({"role": "user", "content": parts})
+                    if text_parts:
+                        openai_messages.append({"role": "user", "content": text_parts})
                 else:
                     openai_messages.append(
                         {"role": "user", "content": str(msg.content)}
