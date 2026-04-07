@@ -1,0 +1,25 @@
+services:
+  mcp-server:
+    build: .
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./docs:/app/docs:ro
+      - ./skills:/app/.skills:ro
+    environment:
+      - PYTHONPATH=/app/src:/app
+    restart: unless-stopped
+
+  devmate:
+    build: .
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./:/workspace
+    environment:
+      - PYTHONPATH=/app/src:/app
+    working_dir: /workspace
+    entrypoint: ["python", "-m", "devmate"]
+    command: ["chat"]
+    depends_on:
+      - mcp-server

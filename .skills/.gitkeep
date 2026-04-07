@@ -1,0 +1,4 @@
+# Skills Directory
+
+This directory contains reusable skill definitions for DevMate.
+Each skill is a markdown file with YAML frontmatter.

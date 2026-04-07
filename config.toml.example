@@ -1,0 +1,43 @@
+# DevMate Configuration
+# Copy this file to config.toml and fill in your API keys
+
+[model]
+ai_base_url = "https://open.bigmodel.cn/api/anthropic"
+base_url = "https://open.bigmodel.cn/api/anthropic"
+api_key = "YOUR_API_KEY_HERE"
+model_name = "glm-5-turbo"
+embedding_model_name = "text-embedding-3-small"
+temperature = 0.7
+max_tokens = 4096
+
+[search]
+tavily_api_key = "YOUR_TAVILY_API_KEY"
+max_results = 5
+
+[langsmith]
+enabled = true
+langchain_tracing_v2 = true
+langchain_api_key = "YOUR_LANGSMITH_API_KEY"
+langchain_project = "devmate"
+project_name = "devmate"
+
+[mcp_server]
+host = "0.0.0.0"
+port = 8001
+route = "/mcp"
+
+[rag]
+docs_dir = "docs"
+docs_directory = "docs"
+chroma_persist_dir = ".chroma_db"
+chroma_persist_directory = ".chroma_db"
+chunk_size = 1000
+chunk_overlap = 200
+
+[skills]
+skills_dir = ".skills"
+directory = ".skills"
+auto_register = true
+
+[output]
+workspace_dir = "./output"
