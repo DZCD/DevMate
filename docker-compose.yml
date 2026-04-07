@@ -1,25 +1,37 @@
 services:
   mcp-server:
     build: .
+    container_name: devmate-mcp-server
     ports:
       - "8001:8001"
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./docs:/app/docs:ro
-      - ./skills:/app/.skills:ro
+      - ./.skills:/app/.skills:ro
     environment:
       - PYTHONPATH=/app/src:/app
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   devmate:
     build: .
+    container_name: devmate-agent
     volumes:
       - ./config.toml:/app/config.toml:ro
-      - ./:/workspace
+      - ./docs:/app/docs:ro
+      - ./.skills:/app/.skills:ro
     environment:
       - PYTHONPATH=/app/src:/app
-    working_dir: /workspace
+    working_dir: /app
     entrypoint: ["python", "-m", "devmate"]
     command: ["chat"]
     depends_on:
-      - mcp-server
+      mcp-server:
+        condition: service_healthy
+    stdin_open: true
+    tty: true

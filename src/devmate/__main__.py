@@ -89,12 +89,12 @@ def init(ctx: click.Context, config: str | None) -> None:
 @click.pass_context
 def chat(ctx: click.Context, config: str | None, workspace: str | None) -> None:
     """Start an interactive chat session."""
-    from devmate.agent import create_agent
+    from devmate.agent import create_agent_func
 
     click.echo("Starting DevMate chat session...")
     click.echo("Type 'exit', 'quit', or press Ctrl+C to end.")
 
-    agent = create_agent(config_path=config, workspace=workspace)
+    agent = create_agent_func(config_path=config, workspace=workspace)
 
     async def _run() -> None:
         try:
@@ -131,9 +131,9 @@ def run(
     ctx: click.Context, prompt: str, config: str | None, workspace: str | None
 ) -> None:
     """Execute a single task with the given prompt."""
-    from devmate.agent import create_agent
+    from devmate.agent import create_agent_func
 
-    agent = create_agent(config_path=config, workspace=workspace)
+    agent = create_agent_func(config_path=config, workspace=workspace)
 
     async def _run() -> str:
         try:

@@ -1,15 +1,15 @@
 """Agent core module for DevMate.
 
-Creates a ReAct agent with MCP tools, RAG retrieval, file operations,
+Creates an agent with MCP tools, RAG retrieval, file operations,
 and skills integration. Uses LangChain with Anthropic-compatible LLM.
 """
 
 import asyncio
 import logging
 
-from langchain.agents import create_react_agent
+from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
-from langchain_core.prompts import PromptTemplate
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 
 from devmate.config import (
@@ -68,13 +68,7 @@ When a user asks a question or gives a task:
 - Always use tools when relevant rather than answering from memory.
 - When searching, use specific and targeted queries.
 - When writing code, follow PEP 8 and project conventions.
-- Never use print() statements - use logging instead.
-
-## Available Tools
-
-{tool_names}
-
-{tool_descriptions}"""
+- Never use print() statements - use logging instead."""
 
 
 class DevMateAgent:
@@ -150,7 +144,12 @@ class DevMateAgent:
         logger.info("DevMate agent fully initialized")
 
     async def _connect_mcp(self) -> None:
-        """Connect to MCP server and retrieve tools."""
+        """Connect to MCP server and retrieve tools.
+
+        Uses the langchain-mcp-adapters v0.2+ API where MultiServerMCPClient
+        is NOT a context manager. Instead, call ``await client.get_tools()``
+        directly — it creates a fresh session per invocation internally.
+        """
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
 
@@ -173,10 +172,8 @@ class DevMateAgent:
                 route,
             )
 
-            client = MultiServerMCPClient(connections=connections)
-            # Import context managers for connecting
-            await client.__aenter__()
-            mcp_tools = client.get_tools()
+            self._mcp_client = MultiServerMCPClient(connections=connections)
+            mcp_tools = await self._mcp_client.get_tools()
 
             if mcp_tools:
                 self._tools.extend(mcp_tools)
@@ -190,8 +187,6 @@ class DevMateAgent:
                     "MCP server returned no tools. Search will rely on RAG only."
                 )
 
-            self._mcp_client = client
-
         except Exception as exc:
             logger.warning(
                 "Failed to connect to MCP server: %s. Continuing without MCP tools.",
@@ -200,25 +195,26 @@ class DevMateAgent:
             self._mcp_client = None
 
     def _create_agent(self) -> None:
-        """Create the ReAct agent with all tools."""
+        """Create the agent with all tools using langchain create_agent."""
         tool_names = ", ".join(t.name for t in self._tools)
         tool_descriptions = "\n".join(
             f"- {t.name}: {t.description}" for t in self._tools
         )
 
-        prompt = PromptTemplate.from_template(
-            SYSTEM_PROMPT.format(
-                tool_names=tool_names,
-                tool_descriptions=tool_descriptions,
-            )
+        system_prompt = (
+            SYSTEM_PROMPT
+            + "\n\n## Available Tools\n\n"
+            + tool_names
+            + "\n\n"
+            + tool_descriptions
         )
 
-        self._agent = create_react_agent(
-            llm=self._llm,
+        self._agent = create_agent(
+            model=self._llm,
             tools=self._tools,
-            prompt=prompt,
+            system_prompt=system_prompt,
         )
-        logger.info("ReAct agent created with %d tools", len(self._tools))
+        logger.info("Agent created with %d tools", len(self._tools))
 
     async def run(self, prompt: str) -> str:
         """Run the agent with a given prompt.
@@ -235,8 +231,18 @@ class DevMateAgent:
         logger.info("Running agent with prompt: %s", prompt[:100])
 
         try:
-            result = await self._agent.ainvoke({"input": prompt})
-            output = result.get("output", "No output generated.")
+            result = await self._agent.ainvoke(
+                {"messages": [HumanMessage(content=prompt)]}
+            )
+            # Extract the last AI message content from the response
+            messages = result.get("messages", [])
+            output = ""
+            for msg in reversed(messages):
+                if hasattr(msg, "content") and msg.type == "ai":
+                    output = msg.content
+                    break
+            if not output:
+                output = "No output generated."
             logger.info("Agent response received (%d chars)", len(output))
             return output
         except Exception as exc:
@@ -270,16 +276,16 @@ class DevMateAgent:
             logger.info("Agent: %s", response)
 
     async def cleanup(self) -> None:
-        """Clean up resources."""
-        if hasattr(self, "_mcp_client") and self._mcp_client is not None:
-            try:
-                await self._mcp_client.__aexit__(None, None, None)
-                logger.info("MCP client disconnected")
-            except Exception as exc:
-                logger.warning("Error closing MCP client: %s", exc)
+        """Clean up resources.
+
+        MultiServerMCPClient (v0.2+) is not a context manager and has no
+        explicit close method — sessions are created and torn down per tool
+        call, so no cleanup is needed.
+        """
+        logger.info("Agent cleanup complete")
 
 
-def create_agent(
+def create_agent_func(
     config_path: str | None = None,
     workspace: str | None = None,
 ) -> DevMateAgent:

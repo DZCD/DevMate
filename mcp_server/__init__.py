@@ -4,7 +4,9 @@ Provides a search_web tool powered by Tavily Search API.
 Uses mcp.server.lowlevel.Server with StreamableHTTPSessionManager.
 """
 
+import contextlib
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import mcp.types as types
@@ -14,9 +16,6 @@ from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 
 logger = logging.getLogger(__name__)
-
-# Create the MCP server instance
-mcp_server = Server("devmate-search")
 
 
 def _create_search_web_tool(tavily_api_key: str, max_results: int = 5) -> types.Tool:
@@ -96,16 +95,21 @@ def create_mcp_app(
     Returns:
         A Starlette application instance.
     """
+    from starlette.types import Receive, Scope, Send
+
     logger.info("Creating MCP server app (route=%s)", route)
+
+    # Create a fresh MCP server instance per app
+    server = Server("devmate-search")
 
     search_tool = _create_search_web_tool(tavily_api_key, max_results)
 
-    @mcp_server.list_tools()
+    @server.list_tools()
     async def list_tools() -> list[types.Tool]:
         """List available tools."""
         return [search_tool]
 
-    @mcp_server.call_tool()
+    @server.call_tool()
     async def call_tool(
         name: str,
         arguments: dict[str, Any] | None = None,
@@ -120,17 +124,31 @@ def create_mcp_app(
         return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
 
     # Create session manager with stateless mode
-    session_manager = StreamableHTTPSessionManager(app=mcp_server, stateless=True)
+    session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
 
-    # Build Starlette app
+    async def handle_streamable_http(
+        scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        """Handle streamable HTTP requests through the session manager."""
+        await session_manager.handle_request(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        """Manage session manager lifecycle."""
+        async with session_manager.run():
+            logger.info("MCP server started with StreamableHTTP session manager")
+            try:
+                yield
+            finally:
+                logger.info("MCP server shutting down")
+
+    # Build Starlette app with lifespan
     app = Starlette(
         routes=[
-            Mount(
-                route,
-                app=session_manager.handle_streamable_http,
-            ),
+            Mount(route, app=handle_streamable_http),
             Route("/health", lambda _: _health_response()),
         ],
+        lifespan=lifespan,
     )
 
     return app
