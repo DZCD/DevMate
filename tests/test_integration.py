@@ -3,7 +3,7 @@
 Tests cross-module interactions:
 - MCP Server HTTP endpoints (Starlette ASGI test client)
 - RAG document ingestion -> retrieval pipeline
-- Agent + MCP + RAG end-to-end flow (mocked LLM)
+- Agent + RAG end-to-end flow (mocked LLM)
 - File tools + Skills cross-module workflow
 - Config -> module initialization flow
 """
@@ -166,15 +166,10 @@ class TestAgentIntegration:
 
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
-    @patch(
-        "langchain_mcp_adapters.client.MultiServerMCPClient",
-        new_callable=MagicMock,
-    )
     @patch("devmate.agent.OpenAICompatibleAdapter")
     async def test_agent_initialize_with_mocks(
         self,
         mock_llm_cls,
-        mock_mcp_client_cls,
         mock_skills_cls,
         mock_rag_cls,
         tmp_path,
@@ -199,11 +194,6 @@ class TestAgentIntegration:
         mock_skills_instance.create_tools.return_value = []
         mock_skills_cls.return_value = mock_skills_instance
 
-        # MCP client mock
-        mock_mcp_instance = MagicMock()
-        mock_mcp_instance.get_tools = AsyncMock(return_value=[])
-        mock_mcp_client_cls.return_value = mock_mcp_instance
-
         agent = DevMateAgent(config_path=str(config_file), workspace=str(tmp_path))
         await agent.initialize()
 
@@ -226,39 +216,34 @@ class TestAgentIntegration:
 
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
-    @patch(
-        "langchain_mcp_adapters.client.MultiServerMCPClient",
-        new_callable=MagicMock,
-    )
     @patch("devmate.agent.OpenAICompatibleAdapter")
-    async def test_agent_mcp_failure_continues(
+    async def test_agent_rag_failure_continues(
         self,
         mock_llm_cls,
-        mock_mcp_client_cls,
         mock_skills_cls,
         mock_rag_cls,
         tmp_path,
     ) -> None:
-        """Test agent continues when MCP connection fails."""
+        """Test agent continues when RAG init fails (falls back gracefully)."""
         from devmate.agent import DevMateAgent
 
         config_file = write_minimal_config(tmp_path)
 
         mock_llm_cls.return_value = MagicMock()
-        mock_rag_instance = MagicMock()
-        mock_rag_instance.ingest_documents.return_value = 0
-        mock_rag_cls.return_value = mock_rag_instance
+        mock_rag_instance_fallback = MagicMock()
+        mock_rag_instance_fallback.ingest_documents.return_value = 0
+        mock_rag_cls.side_effect = [
+            RuntimeError("RAG init error"),
+            mock_rag_instance_fallback,
+        ]
         mock_skills_instance = MagicMock()
         mock_skills_instance.load_skills.return_value = 0
         mock_skills_instance.get_skill_meta.return_value = ""
         mock_skills_instance.create_tools.return_value = []
         mock_skills_cls.return_value = mock_skills_instance
 
-        # MCP raises exception
-        mock_mcp_client_cls.side_effect = ConnectionRefusedError("Connection refused")
-
         agent = DevMateAgent(config_path=str(config_file), workspace=str(tmp_path))
-        # Should not raise even though MCP fails
+        # Should not raise even though RAG fails
         await agent.initialize()
 
         # Agent should still be functional
@@ -266,15 +251,10 @@ class TestAgentIntegration:
 
     @patch("devmate.agent.RAGEngine")
     @patch("devmate.agent.SkillsManager")
-    @patch(
-        "langchain_mcp_adapters.client.MultiServerMCPClient",
-        new_callable=MagicMock,
-    )
     @patch("devmate.agent.OpenAICompatibleAdapter")
     async def test_agent_run_with_mock(
         self,
         mock_llm_cls,
-        mock_mcp_client_cls,
         mock_skills_cls,
         mock_rag_cls,
         tmp_path,
@@ -300,11 +280,6 @@ class TestAgentIntegration:
         mock_skills_instance.create_tools.return_value = []
         mock_skills_cls.return_value = mock_skills_instance
 
-        # Mock MCP
-        mock_mcp_instance = MagicMock()
-        mock_mcp_instance.get_tools = AsyncMock(return_value=[])
-        mock_mcp_client_cls.return_value = mock_mcp_instance
-
         agent = DevMateAgent(config_path=str(config_file), workspace=str(tmp_path))
         await agent.initialize()
 
@@ -321,15 +296,10 @@ class TestAgentIntegration:
         assert result == "Mocked agent response."
 
     @patch("devmate.agent.RAGEngine")
-    @patch(
-        "langchain_mcp_adapters.client.MultiServerMCPClient",
-        new_callable=MagicMock,
-    )
     @patch("devmate.agent.OpenAICompatibleAdapter")
     async def test_agent_skills_injected_in_prompt(
         self,
         mock_llm_cls,
-        mock_mcp_client_cls,
         mock_rag_cls,
         tmp_path,
     ) -> None:
@@ -366,11 +336,6 @@ directory = "{skills_dir}"
 [rag]
 docs_directory = "{tmp_path / "docs"}"
 chroma_persist_directory = "{tmp_path / ".chroma_db"}"
-
-[mcp_server]
-host = "localhost"
-port = 18001
-route = "/mcp"
 """
         config_file = tmp_path / "config.toml"
         config_file.write_text(config_content, encoding="utf-8")
@@ -379,10 +344,6 @@ route = "/mcp"
         mock_rag_instance = MagicMock()
         mock_rag_instance.ingest_documents.return_value = 0
         mock_rag_cls.return_value = mock_rag_instance
-
-        mock_mcp_instance = MagicMock()
-        mock_mcp_instance.get_tools = AsyncMock(return_value=[])
-        mock_mcp_client_cls.return_value = mock_mcp_instance
 
         # Don't mock SkillsManager — use real one with our test skills
         agent = DevMateAgent(config_path=str(config_file), workspace=str(tmp_path))
@@ -521,11 +482,6 @@ docs_directory = "test_docs"
 chroma_persist_directory = "test_chroma"
 chunk_size = 500
 chunk_overlap = 100
-
-[mcp_server]
-host = "localhost"
-port = 8001
-route = "/mcp"
 """
         config_file = tmp_path / "config.toml"
         config_file.write_text(config_content, encoding="utf-8")
@@ -565,11 +521,6 @@ api_key = "test"
 
 [skills]
 directory = "custom_skills"
-
-[mcp_server]
-host = "localhost"
-port = 8001
-route = "/mcp"
 """
         config_file = tmp_path / "config.toml"
         config_file.write_text(config_content, encoding="utf-8")

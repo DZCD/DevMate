@@ -47,11 +47,6 @@ enabled = false
 [rag]
 docs_directory = "docs"
 chroma_persist_directory = ".chroma_db"
-
-[mcp_server]
-host = "localhost"
-port = 18001
-route = "/mcp"
 """
     config_file = tmp_path / "config.toml"
     config_file.write_text(config_content, encoding="utf-8")
@@ -87,10 +82,6 @@ async def build_agent(
     with (
         patch("devmate.agent.RAGEngine") as mock_rag_cls,
         patch("devmate.agent.SkillsManager") as mock_skills_cls,
-        patch(
-            "langchain_mcp_adapters.client.MultiServerMCPClient",
-            new_callable=MagicMock,
-        ) as mock_mcp_cls,
         patch("devmate.agent.OpenAICompatibleAdapter") as mock_llm_cls,
     ):
         # RAG mock
@@ -104,11 +95,6 @@ async def build_agent(
         mock_skills_instance.get_skill_meta.return_value = ""
         mock_skills_instance.create_tools.return_value = []
         mock_skills_cls.return_value = mock_skills_instance
-
-        # MCP mock — no tools
-        mock_mcp_instance = MagicMock()
-        mock_mcp_instance.get_tools = AsyncMock(return_value=[])
-        mock_mcp_cls.return_value = mock_mcp_instance
 
         agent = DevMateAgent(config_path=str(config_file), workspace=str(tmp_path))
         await agent.initialize()

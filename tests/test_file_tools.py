@@ -28,9 +28,9 @@ def _get_tool(tools, name):
 
 
 def test_tools_count(tools) -> None:
-    """Test that create_file_tools returns exactly 10 tools."""
+    """Test that create_file_tools returns exactly 11 tools."""
     tool_names = [t.name for t in tools]
-    assert len(tools) == 10
+    assert len(tools) == 11
     for name in (
         "read",
         "write",
@@ -39,6 +39,7 @@ def test_tools_count(tools) -> None:
         "grep",
         "bash",
         "codesearch",
+        "websearch",
         "webfetch",
         "create_file",
         "list_directory",

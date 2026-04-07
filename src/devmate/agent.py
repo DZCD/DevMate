@@ -9,6 +9,7 @@ Core design:
 - Storage layer for conversation memory (FileStorage with local JSON files)
 - LLM abstraction via OpenAI-compatible adapter (DeepSeek)
 - Tool registry and executor wrapping existing @tool functions
+- Parallel tool execution via asyncio.gather
 """
 
 import asyncio
@@ -16,6 +17,7 @@ import logging
 from typing import Any
 
 from devmate.config import (
+    get_embedding_config,
     get_model_config,
     get_rag_config,
     get_skills_config,
@@ -144,19 +146,23 @@ class DevMateAgent:
 
         # 3. Initialize RAG
         rag_config = get_rag_config(self._config)
-        embedding_api_key = model_config.get("api_key")
-        embedding_api_base = model_config.get("base_url")
+        embedding_config = get_embedding_config(self._config)
         docs_dir = rag_config.get("docs_directory", "docs")
         persist_dir = rag_config.get("chroma_persist_directory", ".chroma_db")
+
+        # Resolve embedding credentials from [embedding] config section
+        embedding_api_key = embedding_config.get("api_key")
+        embedding_api_base = embedding_config.get("base_url")
+        embedding_model_name = embedding_config.get(
+            "model_name", "text-embedding-3-small"
+        )
 
         try:
             self._rag_engine = RAGEngine(
                 persist_directory=persist_dir,
                 chunk_size=rag_config.get("chunk_size", 1000),
                 chunk_overlap=rag_config.get("chunk_overlap", 200),
-                embedding_model_name=model_config.get(
-                    "embedding_model_name", "text-embedding-3-small"
-                ),
+                embedding_model_name=embedding_model_name,
                 openai_api_key=embedding_api_key,
                 openai_api_base=embedding_api_base,
             )
@@ -202,64 +208,9 @@ class DevMateAgent:
         self._llm_tool_defs = tools_to_llm_defs(self._tools)
         logger.info("Tools registered: %d", len(self._tools))
 
-        # 6. Connect to MCP server for additional tools
-        await self._connect_mcp()
-
-        # 7. Build system prompt
+        # 6. Build system prompt
         self._build_system_prompt()
         logger.info("DevMate agent fully initialized")
-
-    async def _connect_mcp(self) -> None:
-        """Connect to MCP server and retrieve additional tools."""
-        try:
-            from langchain_mcp_adapters.client import MultiServerMCPClient
-
-            mcp_config = self._config.get("mcp_server", {})
-            host = mcp_config.get("host", "localhost")
-            port = mcp_config.get("port", 8001)
-            route = mcp_config.get("route", "/mcp")
-
-            connections = {
-                "search": {
-                    "transport": "streamable_http",
-                    "url": f"http://{host}:{port}{route}",
-                }
-            }
-
-            logger.info(
-                "Connecting to MCP server at http://%s:%s%s",
-                host,
-                port,
-                route,
-            )
-
-            mcp_client = MultiServerMCPClient(connections=connections)
-            mcp_tools = await mcp_client.get_tools()
-
-            if mcp_tools:
-                for lc_tool in mcp_tools:
-                    try:
-                        self._tool_registry.register(langchain_tool_to_tool(lc_tool))
-                    except ValueError:
-                        logger.debug(
-                            "MCP tool already registered, skipping: %s", lc_tool.name
-                        )
-                self._tools = self._tool_registry.get_all()
-                self._llm_tool_defs = tools_to_llm_defs(self._tools)
-                logger.info(
-                    "Connected to MCP server, total tools: %d",
-                    len(self._tools),
-                )
-            else:
-                logger.warning(
-                    "MCP server returned no tools. Search will rely on RAG only."
-                )
-
-        except Exception as exc:
-            logger.warning(
-                "Failed to connect to MCP server: %s. Continuing without MCP tools.",
-                exc,
-            )
 
     def _build_system_prompt(self) -> None:
         """Build the full system prompt with skills section."""
@@ -381,19 +332,21 @@ class DevMateAgent:
                         date,
                     )
 
-                    # Execute all tools concurrently
-                    tool_results: list[ToolResultBlock] = []
-                    for tc in tool_calls:
+                    # Execute all tools concurrently using asyncio.gather
+                    async def _execute_tool(tc: Any) -> ToolResultBlock:
+                        """Execute a single tool call, returning a ToolResultBlock."""
                         try:
                             result = await self._tool_executor.execute(
                                 tc.name, tc.arguments
                             )
-                            tool_results.append(tool_result(tc.id, result))
+                            return tool_result(tc.id, result)
                         except Exception as exc:
                             logger.error("Tool %s execution error: %s", tc.name, exc)
-                            tool_results.append(
-                                tool_result(tc.id, f"Tool [{tc.name}] error: {exc}")
-                            )
+                            return tool_result(tc.id, f"Tool [{tc.name}] error: {exc}")
+
+                    tool_results = list(
+                        await asyncio.gather(*[_execute_tool(tc) for tc in tool_calls])
+                    )
 
                     # Add tool results as a single user message
                     if tool_results:

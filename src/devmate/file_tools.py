@@ -12,6 +12,7 @@ Tools:
     grep          — Regex content search across files
     bash          — Execute shell commands with timeout
     codesearch    — Exa API code search via MCP protocol
+    websearch     — Exa AI web search via MCP protocol (direct)
     webfetch      — HTTP page fetching with HTML-to-text extraction
     create_file   — (deprecated) Create a new file
     list_directory — (deprecated) List directory contents
@@ -1140,7 +1141,101 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
             return f"Code search failed: {exc}"
 
     # ------------------------------------------------------------------
-    # 8. webfetch
+    # 8. websearch — Exa AI web search via MCP protocol (direct)
+    # ------------------------------------------------------------------
+    @tool
+    def websearch(
+        query: str,
+        num_results: int = 8,
+        livecrawl: str = "fallback",
+        type: str = "auto",
+        context_max_characters: int = 10000,
+    ) -> str:
+        """Web search tool powered by Exa AI.
+
+        Search the internet for up-to-date information, documentation,
+        articles, and more. Today's date is 2026-04-07. Returns search
+        results with relevant content excerpts.
+
+        Use this when you need current information that may not be in
+        your training data.
+
+        Supports different search modes:
+          - 'auto' (balanced, default)
+          - 'fast' (quick results)
+          - 'deep' (comprehensive)
+
+        Args:
+            query: Search query keywords.
+            num_results: Number of results to return (default 8).
+            livecrawl: Crawl mode: 'fallback' (default) or 'preferred'.
+            type: Search type: 'auto', 'fast', or 'deep'.
+            context_max_characters: Max context chars per result (default 10000).
+        """
+        num_results = max(1, min(20, num_results))
+        if livecrawl not in ("fallback", "preferred"):
+            livecrawl = "fallback"
+        if type not in ("auto", "fast", "deep"):
+            type = "auto"
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search_exa",
+                "arguments": {
+                    "query": query,
+                    "type": type,
+                    "numResults": num_results,
+                    "livecrawl": livecrawl,
+                    "contextMaxCharacters": context_max_characters,
+                },
+            },
+        }
+
+        try:
+            import httpx
+        except ImportError:
+            return (
+                "websearch requires the 'httpx' package. "
+                "Install with: pip install httpx"
+            )
+
+        try:
+            with httpx.Client(timeout=25.0) as client:
+                response = client.post(
+                    "https://mcp.exa.ai/mcp",
+                    json=payload,
+                    headers={
+                        "accept": "application/json, text/event-stream",
+                        "content-type": "application/json",
+                    },
+                )
+            if response.status_code != 200:
+                err = response.text[:500]
+                return f"Web search request failed ({response.status_code}): {err}"
+
+            # Parse SSE response
+            for line in response.text.split("\n"):
+                if line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                        content = data.get("result", {}).get("content", [])
+                        if content and content[0].get("text"):
+                            return content[0]["text"]
+                    except (ValueError, KeyError, IndexError):
+                        continue
+
+            return "No search results found. Try a different query."
+        except httpx.TimeoutException:
+            return "Web search request timed out (25s)"
+        except Exception as exc:
+            logger.error("websearch failed: %s", exc)
+            return f"Web search failed: {exc}"
+
+    # ------------------------------------------------------------------
+    # 10. webfetch
     # ------------------------------------------------------------------
     @tool
     def webfetch(url: str, max_chars: int = 50000) -> str:
@@ -1230,7 +1325,7 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
             return f"Web fetch failed: {exc}"
 
     # ------------------------------------------------------------------
-    # 9. create_file (deprecated, retained for backward compatibility)
+    # 11. create_file (deprecated, retained for backward compatibility)
     # ------------------------------------------------------------------
     @tool
     def create_file(file_path: str, content: str = "", overwrite: bool = False) -> str:
@@ -1267,7 +1362,7 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
             return f"Error creating file: {exc}"
 
     # ------------------------------------------------------------------
-    # 10. list_directory (deprecated, retained for backward compatibility)
+    # 12. list_directory (deprecated, retained for backward compatibility)
     # ------------------------------------------------------------------
     @tool
     def list_directory(dir_path: str = ".") -> str:
@@ -1312,7 +1407,7 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
             return f"Error listing directory: {exc}"
 
     # ------------------------------------------------------------------
-    # Return all 10 tools
+    # Return all tools
     # ------------------------------------------------------------------
     return [
         read,
@@ -1322,6 +1417,7 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
         grep,
         bash,
         codesearch,
+        websearch,
         webfetch,
         create_file,
         list_directory,

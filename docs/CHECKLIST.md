@@ -84,11 +84,11 @@
 
 ### 3.5 测试公共 fixtures 完善
 - **标准**: `tests/conftest.py` 提供共享 fixtures（临时目录、mock LLM、mock 配置等），减少测试重复代码
-- **状态**: [FAIL] 已验证 — conftest.py 仅包含 2 行注释 `"""Shared test fixtures for DevMate tests."""`，无任何实际 fixture。各测试文件使用 pytest 内置的 tmp_path fixture 和各自的 `_write_minimal_config` / `_create_minimal_config` helper，导致配置创建逻辑在 test_integration.py 和 test_agent_e2e.py 中重复。
-- **修复建议**:
-  1. 将 `_write_minimal_config` 和 `_create_minimal_config` 提取到 conftest.py 作为共享 fixture（如 `@pytest.fixture def minimal_config(tmp_path)`）
-  2. 将 `_build_agent` helper 提取到 conftest.py 作为 `@pytest.fixture async def agent_with_mock_llm(tmp_path, mock_llm_responses)`
-  3. 提取 mock LLM response 工厂函数
+- **状态**: [PASS] 已验证 — architect 修复后：
+  - `tests/helpers.py` 提供共享辅助模块：`write_minimal_config(tmp_path, skills_dir)` 创建最小配置文件、`build_agent(tmp_path, mock_llm_responses)` 构建完整 mock agent
+  - `tests/conftest.py` 注册 `minimal_config` fixture（调用 `write_minimal_config`），pytest 自动发现
+  - `test_integration.py` 和 `test_agent_e2e.py` 改为导入共享 helpers，消除了约 170 行重复代码
+  - 151 tests 全部通过，ruff 全绿
 
 ---
 
@@ -256,25 +256,21 @@
 |------|--------|------|--------|------|
 | 一、项目结构与配置 | 5 | 5 | 0 | 0 |
 | 二、代码质量 | 4 | 4 | 0 | 0 |
-| 三、测试覆盖 | 5 | 4 | 1 | 0 |
+| 三、测试覆盖 | 5 | 5 | 0 | 0 |
 | 四、架构对标 TS 模板 | 7 | 6 | 0 | 1 |
 | 五、功能验证 | 4 | 4 | 0 | 0 |
 | 六、CI/CD 与部署就绪 | 2 | 2 | 0 | 0 |
-| **合计** | **27** | **25** | **1** | **1** |
+| **合计** | **27** | **26** | **0** | **1** |
 
-**通过率: 25/27 = 92.6%**
+**通过率: 26/27 = 96.3%（1 项合理 SKIP）**
 
 ---
 
-## 未通过项修复建议
+## 已关闭的修复建议
 
-### [FAIL] 3.5: 测试公共 fixtures 完善
-- **问题描述**: `tests/conftest.py` 仅包含一行注释，无实际 fixture。配置创建逻辑（`_write_minimal_config` / `_create_minimal_config`）在 `test_integration.py` 和 `test_agent_e2e.py` 中重复实现，违反 DRY 原则。
-- **修复建议**:
-  1. 将 `_write_minimal_config(tmp_path, skills_dir=None)` 提取到 `conftest.py` 作为 `@pytest.fixture def minimal_config_file(tmp_path)`
-  2. 将 `_build_agent(tmp_path, mock_llm_responses)` 提取到 `conftest.py` 作为共享的 agent 构建工具
-  3. 将 mock LLM response 工厂（LLMResponse/TextBlock/ToolCall 构建）提取为 helper 函数
-- **参考文件**: `tests/conftest.py`（当前）、`tests/test_integration.py`（L156-185）、`tests/test_agent_e2e.py`（L29-121）
+### ~~[FAIL] 3.5: 测试公共 fixtures 完善~~ → 已 PASS
+- 修复时间: 2026-04-07
+- 修复内容: 新增 `tests/helpers.py`（`write_minimal_config` + `build_agent`），更新 `conftest.py`（注册 `minimal_config` fixture），消除约 170 行重复代码
 
 ---
 

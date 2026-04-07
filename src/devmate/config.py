@@ -89,5 +89,14 @@ def get_skills_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_mcp_server_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Extract MCP server configuration."""
+    """Extract MCP server configuration (legacy, used by 'devmate serve')."""
     return config.get("mcp_server", {})
+
+
+def get_embedding_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Extract embedding configuration.
+
+    Returns a dict with keys like provider, api_key, model_name, base_url.
+    Falls back to empty dict if [embedding] section is absent.
+    """
+    return config.get("embedding", {})

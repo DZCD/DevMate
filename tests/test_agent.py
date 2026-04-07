@@ -38,10 +38,6 @@ class TestAgentBasics:
         with (
             patch("devmate.agent.RAGEngine") as mock_rag_cls,
             patch("devmate.agent.SkillsManager") as mock_skills_cls,
-            patch(
-                "langchain_mcp_adapters.client.MultiServerMCPClient",
-                new_callable=MagicMock,
-            ) as mock_mcp_cls,
             patch("devmate.agent.OpenAICompatibleAdapter") as mock_llm_cls,
         ):
             mock_rag_instance = MagicMock()
@@ -53,10 +49,6 @@ class TestAgentBasics:
             mock_skills_instance.create_tools.return_value = []
             mock_skills_instance.get_skill_meta.return_value = ""
             mock_skills_cls.return_value = mock_skills_instance
-
-            mock_mcp_instance = MagicMock()
-            mock_mcp_instance.get_tools = AsyncMock(return_value=[])
-            mock_mcp_cls.return_value = mock_mcp_instance
 
             agent = DevMateAgent(config_path=config_path, workspace=str(tmp_path))
             await agent.initialize()
@@ -71,8 +63,8 @@ class TestAgentBasics:
             mock_rag_cls.assert_called_once()
             mock_skills_cls.assert_called_once()
 
-    async def test_initialize_continues_on_mcp_failure(self, tmp_path) -> None:
-        """Test agent initialization continues when MCP connection fails."""
+    async def test_initialize_continues_on_rag_failure(self, tmp_path) -> None:
+        """Test agent initialization continues when RAG init fails."""
         from devmate.agent import DevMateAgent
 
         config_path = str(write_minimal_config(tmp_path))
@@ -80,23 +72,21 @@ class TestAgentBasics:
         with (
             patch("devmate.agent.RAGEngine") as mock_rag_cls,
             patch("devmate.agent.SkillsManager") as mock_skills_cls,
-            patch(
-                "langchain_mcp_adapters.client.MultiServerMCPClient",
-                new_callable=MagicMock,
-            ) as mock_mcp_cls,
             patch("devmate.agent.OpenAICompatibleAdapter"),
         ):
-            mock_rag_instance = MagicMock()
-            mock_rag_instance.ingest_documents.return_value = 0
-            mock_rag_cls.return_value = mock_rag_instance
+            # First call raises (with API key), second call succeeds (fallback)
+            mock_rag_instance_fallback = MagicMock()
+            mock_rag_instance_fallback.ingest_documents.return_value = 0
+            mock_rag_cls.side_effect = [
+                RuntimeError("RAG error"),
+                mock_rag_instance_fallback,
+            ]
 
             mock_skills_instance = MagicMock()
             mock_skills_instance.load_skills.return_value = 0
             mock_skills_instance.create_tools.return_value = []
             mock_skills_instance.get_skill_meta.return_value = ""
             mock_skills_cls.return_value = mock_skills_instance
-
-            mock_mcp_cls.side_effect = ConnectionRefusedError("refused")
 
             agent = DevMateAgent(config_path=config_path, workspace=str(tmp_path))
             await agent.initialize()
