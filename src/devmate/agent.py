@@ -20,6 +20,7 @@ from devmate.config import (
     get_embedding_config,
     get_model_config,
     get_rag_config,
+    get_search_config,
     get_skills_config,
     load_config,
 )
@@ -189,7 +190,9 @@ class DevMateAgent:
 
         # 5. Build tool list using ToolRegistry
         self._tool_registry = ToolRegistry()
-        file_tools = create_file_tools(self._workspace)
+        search_config = get_search_config(self._config)
+        tavily_api_key = search_config.get("tavily_api_key", "")
+        file_tools = create_file_tools(self._workspace, tavily_api_key=tavily_api_key)
         for lc_tool in file_tools:
             self._tool_registry.register(langchain_tool_to_tool(lc_tool))
 

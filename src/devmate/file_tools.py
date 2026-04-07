@@ -205,11 +205,14 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
 # ===========================================================================
 
 
-def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
+def create_file_tools(
+    workspace: str | Path | None = None, tavily_api_key: str = ""
+) -> list[Any]:
     """Create and return all file operation tools.
 
     Args:
         workspace: Root directory for file operations.  Defaults to cwd.
+        tavily_api_key: API key for Tavily web search.
 
     Returns:
         A list of LangChain ``@tool``-decorated callables.
@@ -1141,7 +1144,7 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
             return f"Code search failed: {exc}"
 
     # ------------------------------------------------------------------
-    # 8. websearch — Exa AI web search via MCP protocol (direct)
+    # 8. websearch — Tavily web search via MCP protocol (direct)
     # ------------------------------------------------------------------
     @tool
     def websearch(
@@ -1151,7 +1154,7 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
         type: str = "auto",
         context_max_characters: int = 10000,
     ) -> str:
-        """Web search tool powered by Exa AI.
+        """Web search tool powered by Tavily.
 
         Search the internet for up-to-date information, documentation,
         articles, and more. Today's date is 2026-04-07. Returns search
@@ -1173,23 +1176,23 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
             context_max_characters: Max context chars per result (default 10000).
         """
         num_results = max(1, min(20, num_results))
-        if livecrawl not in ("fallback", "preferred"):
-            livecrawl = "fallback"
         if type not in ("auto", "fast", "deep"):
             type = "auto"
+        search_depth = "advanced" if type == "deep" else "basic"
+
+        if not tavily_api_key:
+            return "Web search is not configured: missing Tavily API key."
 
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "web_search_exa",
+                "name": "tavily-search",
                 "arguments": {
                     "query": query,
-                    "type": type,
-                    "numResults": num_results,
-                    "livecrawl": livecrawl,
-                    "contextMaxCharacters": context_max_characters,
+                    "max_results": num_results,
+                    "search_depth": search_depth,
                 },
             },
         }
@@ -1205,7 +1208,7 @@ def create_file_tools(workspace: str | Path | None = None) -> list[Any]:
         try:
             with httpx.Client(timeout=25.0) as client:
                 response = client.post(
-                    "https://mcp.exa.ai/mcp",
+                    f"https://mcp.tavily.com/mcp/?tavilyApiKey={tavily_api_key}",
                     json=payload,
                     headers={
                         "accept": "application/json, text/event-stream",
