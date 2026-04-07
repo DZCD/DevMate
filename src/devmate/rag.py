@@ -93,17 +93,31 @@ class RAGEngine:
 
         total_chunks = 0
         for md_file in md_files:
-            chunks = self._ingest_file(md_file)
+            file_mtime = str(md_file.stat().st_mtime)
+
+            # Check if file has already been ingested with the same mtime
+            existing = self._collection.get(
+                where={"source": str(md_file)},
+                include=["metadatas"],
+            )
+            if existing and existing["metadatas"] and existing["metadatas"][0]:
+                existing_mtime = existing["metadatas"][0].get("file_mtime")
+                if existing_mtime == file_mtime:
+                    logger.info("Skipping unchanged file: %s", md_file)
+                    continue
+
+            chunks = self._ingest_file(md_file, file_mtime=file_mtime)
             total_chunks += chunks
 
         logger.info("Ingested %d total chunks", total_chunks)
         return total_chunks
 
-    def _ingest_file(self, file_path: Path) -> int:
+    def _ingest_file(self, file_path: Path, file_mtime: str = "") -> int:
         """Ingest a single markdown file.
 
         Args:
             file_path: Path to the markdown file.
+            file_mtime: File modification timestamp string.
 
         Returns:
             Number of chunks ingested.
@@ -149,6 +163,8 @@ class RAGEngine:
                 "source": str(file_path),
                 "chunk_index": str(i),
             }
+            if file_mtime:
+                metadata["file_mtime"] = file_mtime
             metadata.update(chunk.metadata)
             metadatas.append(metadata)
 
