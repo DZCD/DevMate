@@ -330,16 +330,19 @@ class TestEndToEndWorkflow:
         assert "semantic" in output
 
     def test_skills_match_hiking_query(self, tmp_path) -> None:
-        """Test that skills match the hiking website query."""
+        """Test that skills are loaded from folder structure and can be queried."""
         from devmate.skills import SkillsManager
 
         skills_dir = tmp_path / ".skills"
         skills_dir.mkdir()
 
-        (skills_dir / "web_project.md").write_text(
+        # Create skill in folder structure: .skills/web_project/SKILL.md
+        web_skill_dir = skills_dir / "web_project"
+        web_skill_dir.mkdir()
+        (web_skill_dir / "SKILL.md").write_text(
             "---\n"
             'name: "web_project"\n'
-            'description: "Creating web projects"\n'
+            'description: "Creating web projects with HTML, CSS, and JavaScript"\n'
             'trigger_keywords: ["website", "project", "build", "create"]\n'
             "---\n\n"
             "# Web Project Template\n\n"
@@ -349,6 +352,11 @@ class TestEndToEndWorkflow:
 
         manager = SkillsManager(skills_dir=skills_dir)
         manager.load_skills()
+
+        # Verify skill is loaded by name
+        skill = manager.get_skill("web_project")
+        assert skill is not None
+        assert "web projects" in skill.description.lower()
 
         # The e2e prompt is about building a hiking website
         matches = manager.find_matching_skills(

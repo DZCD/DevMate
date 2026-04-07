@@ -37,9 +37,10 @@ developers with coding tasks, documentation, debugging, and project management.
    for internal documentation, coding guidelines, and project-specific information.
    Use this to find internal standards, architecture decisions, and best practices.
 
-3. **Skills** (query_skills): Access reusable knowledge patterns and code templates.
-   Use this when a task matches a known pattern or when you want to reference
-   established practices.
+3. **Skills**: Access reusable knowledge patterns and code templates.
+   - `skill(name)`: Load a skill's full instruction content by exact name.
+   - `save_skill(name, description, content)`: Create a new skill.
+   - `query_skills(query)`: Search skills by keyword (legacy).
 
 4. **File Operations**:
    - create_file: Create new files with initial content
@@ -51,8 +52,22 @@ developers with coding tasks, documentation, debugging, and project management.
 When a user asks a question or gives a task:
 1. First, check the knowledge base for relevant internal documentation.
 2. If the knowledge base doesn't have sufficient information, search the web.
-3. Use skills to find reusable patterns when applicable.
+3. Use the `skill` tool to load relevant skill instructions when applicable.
 4. Use file tools to create or modify code as needed.
+
+## Skill Usage Guide
+
+Skills are reusable instruction sets stored as markdown files. Each skill
+contains detailed guidance for specific tasks or patterns.
+
+To use a skill:
+1. Review the available skills listed below.
+2. Call `skill(name)` with the exact skill name to load its full instructions.
+3. Follow the instructions provided by the skill to complete the task.
+
+To create a new skill:
+1. Call `save_skill(name, description, content)` with the skill details.
+2. The skill will be saved and immediately available.
 
 ## Response Guidelines
 
@@ -69,6 +84,19 @@ When a user asks a question or gives a task:
 - When searching, use specific and targeted queries.
 - When writing code, follow PEP 8 and project conventions.
 - Never use print() statements - use logging instead."""
+
+SKILL_USAGE_SECTION = """
+
+## Available Skills
+
+Below is the list of skills currently available. Use the `skill` tool
+with the exact name to load detailed instructions.
+
+{available_skills}
+
+When you need guidance for a specific task, check if a relevant skill
+exists and load it using `skill(name)`.
+"""
 
 
 class DevMateAgent:
@@ -220,8 +248,18 @@ class DevMateAgent:
             f"- {t.name}: {t.description}" for t in self._tools
         )
 
+        # Inject available skills into system prompt
+        skill_meta = ""
+        if self._skills_manager is not None:
+            skill_meta = self._skills_manager.get_skill_meta()
+
+        skill_section = ""
+        if skill_meta:
+            skill_section = SKILL_USAGE_SECTION.format(available_skills=skill_meta)
+
         system_prompt = (
             SYSTEM_PROMPT
+            + skill_section
             + "\n\n## Available Tools\n\n"
             + tool_names
             + "\n\n"

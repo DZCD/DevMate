@@ -372,6 +372,7 @@ route = "/mcp"
 
         mock_skills_instance = MagicMock()
         mock_skills_instance.load_skills.return_value = 0
+        mock_skills_instance.get_skill_meta.return_value = ""
         mock_skills_instance.create_tools.return_value = []
         mock_skills_cls.return_value = mock_skills_instance
 
@@ -389,7 +390,13 @@ route = "/mcp"
         mock_skills_cls.assert_called_once()
 
         # Verify tools include file tools
-        tool_names = [t.name for t in agent._tools]
+        # (agent._tools may contain MagicMock items from create_tools return,
+        # so filter to only real tools with string names)
+        tool_names = [
+            t.name
+            for t in agent._tools
+            if hasattr(t, "name") and isinstance(t.name, str)
+        ]
         assert "create_file" in tool_names
         assert "write_file" in tool_names
         assert "list_directory" in tool_names
@@ -422,6 +429,7 @@ route = "/mcp"
         mock_rag_cls.return_value = mock_rag_instance
         mock_skills_instance = MagicMock()
         mock_skills_instance.load_skills.return_value = 0
+        mock_skills_instance.get_skill_meta.return_value = ""
         mock_skills_instance.create_tools.return_value = []
         mock_skills_cls.return_value = mock_skills_instance
 
@@ -469,6 +477,7 @@ route = "/mcp"
         # Mock Skills
         mock_skills_instance = MagicMock()
         mock_skills_instance.load_skills.return_value = 0
+        mock_skills_instance.get_skill_meta.return_value = ""
         mock_skills_instance.create_tools.return_value = []
         mock_skills_cls.return_value = mock_skills_instance
 
@@ -489,6 +498,84 @@ route = "/mcp"
 
         agent._agent.ainvoke.assert_called_once()
 
+    @patch("devmate.agent.ChatOpenAI")
+    @patch("devmate.agent.RAGEngine")
+    @patch(
+        "langchain_mcp_adapters.client.MultiServerMCPClient",
+        new_callable=MagicMock,
+    )
+    async def test_agent_skills_injected_in_prompt(
+        self,
+        mock_mcp_client_cls,
+        mock_rag_cls,
+        mock_llm_cls,
+        tmp_path,
+        _patch_agent_imports,
+    ) -> None:
+        """Test that available skills XML is injected into the system prompt."""
+        from devmate.agent import DevMateAgent
+
+        # Create skills directory in tmp_path and reference it in config
+        skills_dir = tmp_path / ".skills"
+        skills_dir.mkdir()
+        skill_dir = skills_dir / "test_skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: test_skill\ndescription: Test\n---\n# Test\n",
+            encoding="utf-8",
+        )
+
+        # Use absolute path for skills directory in config
+        config_content = f"""
+[model]
+base_url = "https://example.com/api"
+api_key = "test-key"
+model_name = "test-model"
+
+[search]
+tavily_api_key = "tvly-test"
+max_results = 3
+
+[langsmith]
+enabled = false
+
+[skills]
+directory = "{skills_dir}"
+
+[rag]
+docs_directory = "{tmp_path / "docs"}"
+chroma_persist_directory = "{tmp_path / ".chroma_db"}"
+
+[mcp_server]
+host = "localhost"
+port = 18001
+route = "/mcp"
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(config_content, encoding="utf-8")
+
+        mock_llm_cls.return_value = MagicMock()
+        mock_rag_instance = MagicMock()
+        mock_rag_instance.ingest_documents.return_value = 0
+        mock_rag_cls.return_value = mock_rag_instance
+
+        mock_mcp_instance = MagicMock()
+        mock_mcp_instance.get_tools = AsyncMock(return_value=[])
+        mock_mcp_client_cls.return_value = mock_mcp_instance
+
+        # Don't mock SkillsManager — use real one with our test skills
+        agent = DevMateAgent(config_path=str(config_file), workspace=str(tmp_path))
+        await agent.initialize()
+
+        # Verify skills were loaded and meta XML contains our skill
+        assert agent._skills_manager is not None
+        meta_xml = agent._skills_manager.get_skill_meta()
+        assert "<available_skills>" in meta_xml
+        assert "test_skill" in meta_xml
+
+        # Verify the agent was created
+        assert agent._agent is not None
+
 
 # ---------------------------------------------------------------------------
 # 4. File tools + Skills cross-module integration
@@ -498,15 +585,15 @@ route = "/mcp"
 class TestFileToolsSkillsIntegration:
     """Test file tools and skills working together."""
 
-    def test_create_skill_file_and_load(self, tmp_path) -> None:
-        """Test creating a skill file via file tools and loading it."""
+    def test_create_skill_folder_and_load(self, tmp_path) -> None:
+        """Test creating a skill folder via file tools and loading it."""
         from devmate.file_tools import create_file_tools
         from devmate.skills import SkillsManager
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        # Create skill using file tools
+        # Create skill folder using file tools
         tools = create_file_tools(workspace=workspace)
         create_file_tool = next(t for t in tools if t.name == "create_file")
 
@@ -520,16 +607,16 @@ trigger_keywords: ["react", "component", "frontend"]
 
 Use functional components with hooks.
 """
-        skills_dir = workspace / ".skills"
+        skills_dir = workspace / ".skills" / "react_component"
         create_file_tool.invoke(
             {
-                "file_path": str(skills_dir / "react.md"),
+                "file_path": str(skills_dir / "SKILL.md"),
                 "content": skill_content,
             }
         )
 
         # Load the skill
-        manager = SkillsManager(skills_dir=skills_dir)
+        manager = SkillsManager(skills_dir=workspace / ".skills")
         count = manager.load_skills()
         assert count == 1
 
@@ -537,8 +624,8 @@ Use functional components with hooks.
         assert skill is not None
         assert "React" in skill.description
 
-    def test_write_skill_and_search(self, tmp_path) -> None:
-        """Test writing a skill, loading it, and searching for it."""
+    def test_write_skill_and_execute(self, tmp_path) -> None:
+        """Test writing a skill, loading it, and executing it."""
         from devmate.file_tools import create_file_tools
         from devmate.skills import SkillsManager
 
@@ -552,9 +639,10 @@ Use functional components with hooks.
 
         # Create then update the skill file
         initial_content = '---\nname: "web_api"\ndescription: "placeholder"\n---\n'
+        skill_folder = skills_dir / "web_api"
         create_file_tool.invoke(
             {
-                "file_path": str(skills_dir / "api.md"),
+                "file_path": str(skill_folder / "SKILL.md"),
                 "content": initial_content,
             }
         )
@@ -571,15 +659,19 @@ Follow RESTful conventions for all API endpoints.
 """
         write_file_tool.invoke(
             {
-                "file_path": str(skills_dir / "api.md"),
+                "file_path": str(skill_folder / "SKILL.md"),
                 "content": updated_content,
             }
         )
 
-        # Load and search
+        # Load and execute
         manager = SkillsManager(skills_dir=skills_dir)
         manager.load_skills()
 
+        result = manager.execute_skill("web_api")
+        assert "REST API Design" in result
+
+        # Also test legacy keyword matching
         matches = manager.find_matching_skills("I need a REST API endpoint")
         assert len(matches) == 1
         assert matches[0].name == "web_api"
@@ -665,10 +757,12 @@ route = "/mcp"
         skills_config = get_skills_config(config)
         assert skills_config["directory"] == "custom_skills"
 
-        # Create custom skills directory
+        # Create custom skills directory with folder structure
         custom_dir = tmp_path / "custom_skills"
         custom_dir.mkdir()
-        (custom_dir / "skill1.md").write_text(
+        skill_dir = custom_dir / "skill1"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
             '---\nname: "skill1"\ndescription: "test"\n---\n# Skill 1\n',
             encoding="utf-8",
         )
