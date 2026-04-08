@@ -180,8 +180,27 @@ docker compose up --build
 ```
 
 This starts:
+- **chromadb**: Chroma vector database on port 8000
 - **mcp-server**: MCP search server on port 8001
-- **devmate**: Interactive agent (connects to mcp-server)
+- **devmate**: interactive agent container running `python -m devmate chat`
+
+**Interaction notes:**
+- The `devmate` service is configured with `stdin_open: true` and `tty: true`, so it is intended to run in interactive chat mode.
+- `docker compose up --build` is suitable for starting the full stack and viewing logs.
+- If you want a cleaner direct chat session with the agent, use one of these commands:
+
+```bash
+# Start the full stack
+docker compose up --build
+
+# In another terminal, open an interactive chat session in the devmate container
+docker compose exec devmate python -m devmate chat
+
+# Or start a one-off interactive devmate session
+docker compose run --rm devmate chat
+```
+
+This makes the expected interaction path explicit for reviewers while keeping `docker compose up --build` as the main startup command.
 
 ### Using Dockerfile directly
 
