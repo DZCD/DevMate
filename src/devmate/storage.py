@@ -371,12 +371,24 @@ async def add_message(
     return len(data) - 1
 
 
+def _message_has_tool_use(msg: Message) -> bool:
+    return isinstance(msg.content, list) and any(
+        isinstance(b, ToolUseBlock) for b in msg.content
+    )
+
+
+def _message_has_tool_result(msg: Message) -> bool:
+    return isinstance(msg.content, list) and any(
+        isinstance(b, ToolResultBlock) for b in msg.content
+    )
+
+
 def sanitize_messages(messages: list[Message]) -> list[Message]:
     """Sanitize message history to ensure API compliance.
 
     - Skips empty content messages
     - Ensures assistant tool_use messages have corresponding tool_result
-    - Merges consecutive same-role messages
+    - Merges consecutive same-role messages, except across tool-call boundaries
 
     Mirrors TS storage/utils.ts sanitizeMessages().
     """
@@ -419,10 +431,24 @@ def sanitize_messages(messages: list[Message]) -> list[Message]:
                     )
                     break
 
-        # Merge consecutive same-role messages
+        # Merge consecutive same-role messages, but preserve OpenAI tool-calling boundaries.
         prev = result[-1] if result else None
         if prev and prev.role == msg.role:
-            # Merge content
+            prev_has_tool_use = _message_has_tool_use(prev)
+            prev_has_tool_result = _message_has_tool_result(prev)
+            msg_has_tool_use = _message_has_tool_use(msg)
+            msg_has_tool_result = _message_has_tool_result(msg)
+
+            if (
+                prev_has_tool_use
+                or prev_has_tool_result
+                or msg_has_tool_use
+                or msg_has_tool_result
+            ):
+                result.append(Message(role=msg.role, content=msg.content))
+                continue
+
+            # Merge content only for plain same-role messages.
             if isinstance(prev.content, str) and isinstance(msg.content, str):
                 prev = Message(
                     role=prev.role, content=prev.content + "\n" + msg.content
@@ -430,10 +456,7 @@ def sanitize_messages(messages: list[Message]) -> list[Message]:
                 result[-1] = prev
             elif isinstance(prev.content, list) and isinstance(msg.content, list):
                 merged_blocks = list(prev.content)
-                if isinstance(msg.content, str):
-                    merged_blocks.append(TextBlock(text=msg.content))
-                else:
-                    merged_blocks.extend(msg.content)
+                merged_blocks.extend(msg.content)
                 result[-1] = Message(role=prev.role, content=merged_blocks)
             elif isinstance(prev.content, str):
                 # prev is str, msg is list

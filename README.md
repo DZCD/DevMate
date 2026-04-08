@@ -164,6 +164,13 @@ langchain_api_key = "your_langsmith_api_key"
 langchain_project = "devmate"
 ```
 
+### Verified Trace Example
+
+Successful LangSmith trace captured during real task execution:
+
+- Trace: <https://smith.langchain.com/o/f84fbc14-50a8-44fe-9c85-716ce58215f6/projects/p/3a5251db-8113-439f-9210-4dc44f80828c/r/019d6d56-8abd-72e2-b9de-b294da3b79b5?trace_id=019d6d56-8abd-72e2-b9de-b294da3b79b5&start_time=2026-04-08T13:44:41.406057>
+- Task used for verification: `Create a minimal FastAPI hello-world service with one /health endpoint.`
+
 ## Docker
 
 ### Using Docker Compose

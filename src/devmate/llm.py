@@ -1,8 +1,9 @@
 """LLM abstraction layer for DevMate.
 
-Provides LLMClient interface and OpenAI-compatible adapter.
+Provides LLMClient interface and a ChatOpenAI-based adapter.
 
-Follows the architecture of agent-template-ts/src/llm/.
+Uses ``langchain_openai.ChatOpenAI`` as the underlying LLM driver, converting
+between internal Message / ContentBlock types and LangChain message types.
 """
 
 import json
@@ -12,7 +13,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from openai import AsyncOpenAI
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_openai import ChatOpenAI
 
 from devmate.storage import (
     ContentBlock,
@@ -80,69 +82,79 @@ class LLMClient(ABC):
 
 
 # ---------------------------------------------------------------------------
-# OpenAI-compatible adapter (for DeepSeek, etc.)
+# ChatOpenAI adapter
 # ---------------------------------------------------------------------------
 
 
 class OpenAICompatibleAdapter(LLMClient):
-    """Adapter for OpenAI-compatible APIs (DeepSeek, etc.).
+    """Adapter using ``langchain_openai.ChatOpenAI`` for LLM calls.
 
-    Converts internal Message/ContentBlock types to/from OpenAI API format.
-    Mirrors agent-template-ts/src/llm/AnthropicAdapter.ts.
+    Converts internal Message / ContentBlock types to / from LangChain
+    message types so the rest of the codebase stays unchanged.
     """
 
     def __init__(
         self,
         api_key: str,
-        base_url: str = "https://api.deepseek.com",
-        model: str = "deepseek-chat",
+        base_url: str,
+        model: str,
         temperature: float = 0.7,
         max_tokens: int = 8192,
     ) -> None:
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._llm = ChatOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
         self._model = model
-        self._temperature = temperature
-        self._max_tokens = max_tokens
 
-    def _to_openai_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
-        """Convert internal messages to OpenAI API format."""
-        openai_messages: list[dict[str, Any]] = []
+    # -- message conversion --------------------------------------------------
+
+    @staticmethod
+    def _to_langchain_messages(
+        messages: list[Message],
+        system_prompt: str,
+    ) -> list[Any]:
+        """Convert internal messages to LangChain message objects."""
+        lc_messages: list[Any] = [
+            SystemMessage(content=system_prompt),
+        ]
 
         for msg in messages:
             if msg.role == "user":
                 if isinstance(msg.content, str):
-                    openai_messages.append({"role": "user", "content": msg.content})
+                    lc_messages.append(
+                        HumanMessage(content=msg.content)
+                    )
                 elif isinstance(msg.content, list):
-                    text_parts: list[dict[str, Any]] = []
+                    text_parts: list[str] = []
                     for block in msg.content:
                         if isinstance(block, TextBlock):
-                            text_parts.append({"type": "text", "text": block.text})
+                            text_parts.append(block.text)
                         elif isinstance(block, ToolResultBlock):
-                            # OpenAI format: separate message with role="tool"
-                            openai_messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": block.tool_use_id,
-                                    "content": block.content,
-                                }
+                            lc_messages.append(
+                                ToolMessage(
+                                    content=block.content,
+                                    tool_call_id=block.tool_use_id,
+                                )
                             )
                     if text_parts:
-                        openai_messages.append({"role": "user", "content": text_parts})
+                        lc_messages.append(
+                            HumanMessage(
+                                content="\n".join(text_parts)
+                            )
+                        )
                 else:
-                    openai_messages.append(
-                        {"role": "user", "content": str(msg.content)}
+                    lc_messages.append(
+                        HumanMessage(content=str(msg.content))
                     )
 
             elif msg.role == "assistant":
-                # Check if this assistant message has tool_use blocks
-                has_tool_use = False
                 if isinstance(msg.content, list):
-                    has_tool_use = any(isinstance(b, ToolUseBlock) for b in msg.content)
-
-                if has_tool_use:
-                    # Extract text and tool_use parts
-                    text_parts: list[str] = []
                     tool_calls: list[dict[str, Any]] = []
+                    text_parts: list[str] = []
 
                     for block in msg.content:
                         if isinstance(block, TextBlock):
@@ -151,56 +163,37 @@ class OpenAICompatibleAdapter(LLMClient):
                             tool_calls.append(
                                 {
                                     "id": block.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": block.name,
-                                        "arguments": json.dumps(
-                                            block.input, ensure_ascii=False
-                                        ),
-                                    },
+                                    "name": block.name,
+                                    "args": block.input,
                                 }
                             )
 
-                    msg_dict: dict[str, Any] = {"role": "assistant"}
-                    if text_parts:
-                        msg_dict["content"] = "\n".join(text_parts)
-                    else:
-                        msg_dict["content"] = None
-                    msg_dict["tool_calls"] = tool_calls
-                    openai_messages.append(msg_dict)
+                    lc_messages.append(
+                        AIMessage(
+                            content="\n".join(text_parts) if text_parts else "",
+                            tool_calls=tool_calls or None,
+                        )
+                    )
                 else:
-                    # Simple text message
-                    if isinstance(msg.content, str):
-                        openai_messages.append(
-                            {"role": "assistant", "content": msg.content}
+                    lc_messages.append(
+                        AIMessage(
+                            content=str(msg.content)
+                            if not isinstance(msg.content, str)
+                            else msg.content
                         )
-                    elif isinstance(msg.content, list):
-                        text = "\n".join(
-                            b.text for b in msg.content if isinstance(b, TextBlock)
-                        )
-                        openai_messages.append({"role": "assistant", "content": text})
-                    else:
-                        openai_messages.append(
-                            {
-                                "role": "assistant",
-                                "content": str(msg.content),
-                            }
-                        )
+                    )
             else:
-                # Fallback for other roles
-                openai_messages.append(
-                    {
-                        "role": msg.role,
-                        "content": str(msg.content)
-                        if not isinstance(msg.content, str)
-                        else msg.content,
-                    }
+                lc_messages.append(
+                    HumanMessage(content=str(msg.content))
                 )
 
-        return openai_messages
+        return lc_messages
 
-    def _to_openai_tools(self, tools: list[LLMToolDef]) -> list[dict[str, Any]]:
-        """Convert LLMToolDef to OpenAI function calling format."""
+    @staticmethod
+    def _to_langchain_tools(
+        tools: list[LLMToolDef],
+    ) -> list[dict[str, Any]]:
+        """Convert LLMToolDef list to OpenAI function-calling format."""
         return [
             {
                 "type": "function",
@@ -213,46 +206,71 @@ class OpenAICompatibleAdapter(LLMClient):
             for tool in tools
         ]
 
-    def _parse_response(self, response: Any) -> LLMResponse:
-        """Parse OpenAI API response into LLMResponse."""
-        choice = response.choices[0]
-        message = choice.message
-        finish_reason = choice.finish_reason or "stop"
-
+    @staticmethod
+    def _parse_response(response: Any) -> LLMResponse:
+        """Parse LangChain AIMessage into internal LLMResponse."""
         content_blocks: list[ContentBlock] = []
         tool_calls: list[ToolCall] = []
 
         # Text content
-        if message.content:
-            content_blocks.append(TextBlock(text=message.content))
+        text = response.content
+        if text and isinstance(text, str) and text.strip():
+            content_blocks.append(TextBlock(text=text))
+        elif isinstance(text, list):
+            for part in text:
+                if isinstance(part, str) and part.strip():
+                    content_blocks.append(TextBlock(text=part))
+                elif isinstance(part, dict) and part.get("type") == "text":
+                    txt = part.get("text", "")
+                    if txt.strip():
+                        content_blocks.append(TextBlock(text=txt))
 
         # Tool calls
-        if hasattr(message, "tool_calls") and message.tool_calls:
-            for tc in message.tool_calls:
-                tool_id = tc.id or str(uuid.uuid4())
-                func = tc.function
+        raw_tool_calls = getattr(response, "tool_calls", None) or []
+        for tc in raw_tool_calls:
+            tool_id = tc.get("id", str(uuid.uuid4()))
+            name = tc.get("name", "")
+            args = tc.get("args", {})
+            if isinstance(args, str):
                 try:
-                    args = json.loads(func.arguments) if func.arguments else {}
+                    args = json.loads(args)
                 except (json.JSONDecodeError, TypeError):
                     args = {}
-                content_blocks.append(
-                    ToolUseBlock(id=tool_id, name=func.name, input=args)
-                )
-                tool_calls.append(ToolCall(id=tool_id, name=func.name, arguments=args))
+            content_blocks.append(
+                ToolUseBlock(id=tool_id, name=name, input=args)
+            )
+            tool_calls.append(
+                ToolCall(id=tool_id, name=name, arguments=args)
+            )
 
-        # Map finish reasons
-        if finish_reason == "tool_calls":
-            mapped_reason = "tool_calls"
-        elif finish_reason == "length":
-            mapped_reason = "length"
-        else:
-            mapped_reason = "stop"
+        # Determine finish reason
+        finish_reason = "stop"
+        if tool_calls:
+            finish_reason = "tool_calls"
+        # Check for length truncation via response_metadata
+        resp_meta = getattr(response, "response_metadata", {}) or {}
+        finish = resp_meta.get("finish_reason", "")
+        token_usage = resp_meta.get("token_usage", {}) or {}
+        if finish == "length":
+            finish_reason = "length"
+        elif (
+            isinstance(token_usage, dict)
+            and token_usage.get("completion_tokens_details")
+        ):
+            details = token_usage["completion_tokens_details"]
+            if (
+                isinstance(details, dict)
+                and details.get("reasoning_tokens", 0) > 0
+            ):
+                pass  # normal completion with reasoning
 
         return LLMResponse(
             content=content_blocks,
-            finish_reason=mapped_reason,
+            finish_reason=finish_reason,
             tool_calls=tool_calls,
         )
+
+    # -- public interface ----------------------------------------------------
 
     async def chat(
         self,
@@ -260,24 +278,17 @@ class OpenAICompatibleAdapter(LLMClient):
         system_prompt: str,
         tools: list[LLMToolDef] | None = None,
     ) -> LLMResponse:
-        """Send a chat completion request to the OpenAI-compatible API."""
-        openai_messages = [{"role": "system", "content": system_prompt}]
-        openai_messages.extend(self._to_openai_messages(messages))
+        """Send a chat completion request via ChatOpenAI."""
+        lc_messages = self._to_langchain_messages(messages, system_prompt)
 
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": openai_messages,
-            "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
-        }
-
+        llm = self._llm
         if tools:
-            kwargs["tools"] = self._to_openai_tools(tools)
-            kwargs["tool_choice"] = "auto"
+            lc_tools = self._to_langchain_tools(tools)
+            llm = llm.bind_tools(lc_tools)
 
         try:
-            response = await self._client.chat.completions.create(**kwargs)
+            response = await llm.ainvoke(lc_messages)
             return self._parse_response(response)
         except Exception as exc:
-            logger.error("[OpenAICompatibleAdapter] API call failed: %s", exc)
+            logger.error("[ChatOpenAIAdapter] API call failed: %s", exc)
             raise
