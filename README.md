@@ -1,5 +1,7 @@
 # DevMate
 
+[中文说明](./README.zh-CN.md)
+
 AI-powered coding assistant with MCP, RAG, and Skills integration.
 
 ## Features
