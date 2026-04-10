@@ -390,7 +390,7 @@ requires-dist = [
     { name = "langchain-mcp-adapters", specifier = ">=0.2" },
     { name = "langchain-openai", specifier = ">=1.1.0" },
     { name = "langchain-text-splitters" },
-    { name = "langsmith" },
+    { name = "langsmith", specifier = ">=0.3.45" },
     { name = "openai", specifier = ">=2.30.0" },
     { name = "starlette" },
     { name = "tavily-python" },

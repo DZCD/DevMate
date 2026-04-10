@@ -18,7 +18,6 @@ Tools:
 
 import difflib
 import fnmatch
-import json
 import logging
 import os
 import re
