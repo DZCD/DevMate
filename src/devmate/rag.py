@@ -4,11 +4,13 @@ Handles document ingestion, embedding, and retrieval using ChromaDB.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+import httpx
+from chromadb.api.types import EmbeddingFunction
 from langchain_core.documents import Document
 from langchain_core.tools import tool
 from langchain_text_splitters import (
@@ -17,6 +19,102 @@ from langchain_text_splitters import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class DoubaoEmbeddingFunction(EmbeddingFunction):
+    """Embedding function using Volcengine Doubao multimodal embedding API.
+
+    Compatible with ChromaDB's EmbeddingFunction interface.
+    Supports the doubao-embedding-vision model for text embeddings.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model_name: str = "doubao-embedding-vision-250615",
+        base_url: str = "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal",
+    ) -> None:
+        """Initialize the Doubao embedding function.
+
+        Args:
+            api_key: API key for the Volcengine/Doubao service.
+            model_name: The embedding model name.
+            base_url: The embedding API endpoint URL.
+        """
+        self._api_key = api_key
+        self._model_name = model_name
+        self._base_url = base_url
+
+    def __call__(self, input: list[str]) -> list[list[float]]:  # noqa: A002
+        """Generate embeddings for a list of text strings.
+
+        Args:
+            input: List of text strings to embed.
+
+        Returns:
+            List of embedding vectors.
+        """
+        return self._embed_texts(input)
+
+    def _embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Call the Doubao multimodal embedding API.
+
+        The Doubao multimodal API returns a single embedding per request
+        regardless of how many input items are provided. Therefore we call
+        the API once per text to get one embedding per input string.
+
+        Args:
+            texts: List of text strings to embed.
+
+        Returns:
+            List of embedding vectors.
+
+        Raises:
+            RuntimeError: If the API call fails.
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        embeddings: list[list[float]] = []
+
+        for text in texts:
+            payload = {
+                "model": self._model_name,
+                "input": [{"type": "text", "text": text}],
+            }
+
+            try:
+                response = httpx.post(
+                    self._base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=60.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                # Response: {"data": {"embedding": [...], "object": "..."}}
+                embedding = data["data"]["embedding"]
+                embeddings.append(embedding)
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "Doubao embedding API error: %s, body: %s",
+                    exc.response.status_code,
+                    exc.response.text,
+                )
+                raise RuntimeError(
+                    f"Doubao embedding API error: "
+                    f"{exc.response.status_code}"
+                ) from exc
+            except Exception as exc:
+                logger.error("Doubao embedding call failed: %s", exc)
+                raise RuntimeError(
+                    f"Doubao embedding call failed: {exc}"
+                ) from exc
+
+        return embeddings
 
 
 class RAGEngine:
@@ -28,9 +126,12 @@ class RAGEngine:
         collection_name: str = "devmate_docs",
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
-        embedding_model_name: str = "text-embedding-3-small",
+        embedding_model_name: str = "",
         openai_api_key: str | None = None,
         openai_api_base: str | None = None,
+        embedding_provider: str = "openai",
+        embedding_api_key: str | None = None,
+        embedding_base_url: str | None = None,
     ) -> None:
         """Initialize the RAG engine.
 
@@ -39,9 +140,14 @@ class RAGEngine:
             collection_name: Name of the ChromaDB collection.
             chunk_size: Size of document chunks.
             chunk_overlap: Overlap between document chunks.
-            embedding_model_name: Name of the OpenAI embedding model.
+            embedding_model_name: Name of the embedding model.
             openai_api_key: API key for the OpenAI-compatible embedding service.
+                (legacy, prefer embedding_api_key)
             openai_api_base: Base URL for the OpenAI-compatible embedding service.
+                (legacy, prefer embedding_base_url)
+            embedding_provider: Embedding provider, either "openai" or "doubao".
+            embedding_api_key: API key for the embedding service.
+            embedding_base_url: Base URL for the embedding service.
         """
         self._persist_directory = persist_directory
         self._collection_name = collection_name
@@ -49,17 +155,31 @@ class RAGEngine:
         self._chunk_overlap = chunk_overlap
         self._embedding_model_name = embedding_model_name
 
-        self._client = chromadb.PersistentClient(path=persist_directory)
+        # Use ChromaDB server if CHROMA_HOST is set, else embedded mode
+        chroma_host = os.environ.get("CHROMA_HOST")
+        chroma_port = int(os.environ.get("CHROMA_PORT", "8000"))
+        if chroma_host:
+            self._client = chromadb.HttpClient(
+                host=chroma_host, port=chroma_port
+            )
+            logger.info(
+                "Using ChromaDB server at %s:%s", chroma_host, chroma_port
+            )
+        else:
+            self._client = chromadb.PersistentClient(path=persist_directory)
 
-        # Set up embedding function for ChromaDB when API credentials are provided
-        if openai_api_key:
-            embedding_kwargs: dict[str, Any] = {
-                "model_name": embedding_model_name,
-                "api_key": openai_api_key,
-            }
-            if openai_api_base:
-                embedding_kwargs["api_base"] = openai_api_base
-            embedding_function = OpenAIEmbeddingFunction(**embedding_kwargs)
+        # Resolve effective credentials
+        eff_api_key = embedding_api_key or openai_api_key
+        eff_base_url = embedding_base_url or openai_api_base
+
+        # Set up embedding function for ChromaDB when API credentials provided
+        if eff_api_key:
+            embedding_function = self._create_embedding_function(
+                provider=embedding_provider,
+                api_key=eff_api_key,
+                model_name=embedding_model_name,
+                base_url=eff_base_url,
+            )
             self._collection = self._client.get_or_create_collection(
                 name=collection_name,
                 embedding_function=embedding_function,
@@ -69,10 +189,53 @@ class RAGEngine:
                 name=collection_name,
             )
         logger.info(
-            "RAG engine initialized (collection=%s, persist_dir=%s)",
+            "RAG engine initialized (collection=%s, persist_dir=%s, "
+            "provider=%s)",
             collection_name,
             persist_directory,
+            embedding_provider,
         )
+
+    @staticmethod
+    def _create_embedding_function(
+        provider: str,
+        api_key: str,
+        model_name: str,
+        base_url: str | None,
+    ) -> Any:
+        """Create an appropriate ChromaDB embedding function.
+
+        Args:
+            provider: The embedding provider ("openai" or "doubao").
+            api_key: API key for the embedding service.
+            model_name: The embedding model name.
+            base_url: Optional base URL override.
+
+        Returns:
+            A ChromaDB-compatible EmbeddingFunction instance.
+        """
+        if provider == "doubao":
+            default_url = (
+                "https://ark.cn-beijing.volces.com/api/v3/"
+                "embeddings/multimodal"
+            )
+            return DoubaoEmbeddingFunction(
+                api_key=api_key,
+                model_name=model_name,
+                base_url=base_url or default_url,
+            )
+        else:
+            from chromadb.utils.embedding_functions import (
+                OpenAIEmbeddingFunction,
+            )
+
+            kwargs: dict[str, Any] = {
+                "model_name": model_name,
+                "api_key": api_key,
+            }
+            if base_url:
+                kwargs["api_base"] = base_url
+            return OpenAIEmbeddingFunction(**kwargs)
 
     def ingest_documents(self, docs_directory: str | Path) -> int:
         """Ingest all markdown documents from a directory.

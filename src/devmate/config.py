@@ -100,3 +100,21 @@ def get_embedding_config(config: dict[str, Any]) -> dict[str, Any]:
     Falls back to empty dict if [embedding] section is absent.
     """
     return config.get("embedding", {})
+
+
+def get_vision_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Extract vision configuration for image understanding.
+
+    Returns a dict with keys like api_key, base_url, model_name.
+    Falls back to model config if [vision] section is absent or incomplete.
+    """
+    vision_config = config.get("vision", {})
+    model_config = get_model_config(config)
+
+    # Merge with model config as fallback
+    merged = {
+        "api_key": vision_config.get("api_key") or model_config.get("api_key", ""),
+        "base_url": vision_config.get("base_url") or model_config.get("base_url", ""),
+        "model_name": vision_config.get("model_name") or model_config.get("model_name", ""),
+    }
+    return merged

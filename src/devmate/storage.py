@@ -80,10 +80,12 @@ class FileStorage(Storage[T]):
     async def set(self, key: str, value: T) -> None:
         path = self._file_path(key)
         try:
-            path.write_text(
-                json.dumps(value, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            text = json.dumps(value, ensure_ascii=False, indent=2)
+            # Sanitize surrogate characters from terminal input
+            text = text.encode("utf-8", errors="surrogatepass").decode(
+                "utf-8", errors="replace"
             )
+            path.write_text(text, encoding="utf-8")
         except OSError as exc:
             logger.error("FileStorage set error for key %s: %s", key, exc)
 
@@ -204,30 +206,42 @@ ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
 class Message:
     """A conversation message."""
 
-    __slots__ = ("role", "content")
+    __slots__ = ("role", "content", "reasoning_content")
 
-    def __init__(self, role: str, content: str | list[ContentBlock]) -> None:
+    def __init__(
+        self,
+        role: str,
+        content: str | list[ContentBlock],
+        reasoning_content: str | None = None,
+    ) -> None:
         self.role = role
         self.content = content
+        self.reasoning_content = reasoning_content
 
     def to_dict(self) -> dict[str, Any]:
         if isinstance(self.content, str):
-            return {"role": self.role, "content": self.content}
-        return {
-            "role": self.role,
-            "content": [
-                block.to_dict() if hasattr(block, "to_dict") else block
-                for block in self.content
-            ],
-        }
+            d: dict[str, Any] = {"role": self.role, "content": self.content}
+        else:
+            d = {
+                "role": self.role,
+                "content": [
+                    block.to_dict() if hasattr(block, "to_dict") else block
+                    for block in self.content
+                ],
+            }
+        if self.reasoning_content is not None:
+            d["reasoning_content"] = self.reasoning_content
+        return d
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "Message":
         """Deserialize a Message from a dict."""
         role = data["role"]
         content = data["content"]
+        reasoning_content = data.get("reasoning_content")
         if isinstance(content, str):
-            return Message(role=role, content=content)
+            return Message(role=role, content=content,
+                           reasoning_content=reasoning_content)
         # Reconstruct content blocks
         blocks: list[ContentBlock] = []
         for block_data in content:
@@ -249,7 +263,8 @@ class Message:
                         content=block_data.get("content", ""),
                     )
                 )
-        return Message(role=role, content=blocks)
+        return Message(role=role, content=blocks,
+                       reasoning_content=reasoning_content)
 
 
 def user_message(text: str) -> Message:
@@ -445,19 +460,26 @@ def sanitize_messages(messages: list[Message]) -> list[Message]:
                 or msg_has_tool_use
                 or msg_has_tool_result
             ):
-                result.append(Message(role=msg.role, content=msg.content))
+                result.append(Message(
+                    role=msg.role, content=msg.content,
+                    reasoning_content=msg.reasoning_content,
+                ))
                 continue
 
             # Merge content only for plain same-role messages.
             if isinstance(prev.content, str) and isinstance(msg.content, str):
                 prev = Message(
-                    role=prev.role, content=prev.content + "\n" + msg.content
+                    role=prev.role,
+                    content=prev.content + "\n" + msg.content,
                 )
                 result[-1] = prev
             elif isinstance(prev.content, list) and isinstance(msg.content, list):
                 merged_blocks = list(prev.content)
                 merged_blocks.extend(msg.content)
-                result[-1] = Message(role=prev.role, content=merged_blocks)
+                result[-1] = Message(
+                    role=prev.role, content=merged_blocks,
+                    reasoning_content=prev.reasoning_content,
+                )
             elif isinstance(prev.content, str):
                 # prev is str, msg is list
                 blocks = [TextBlock(text=prev.content)]
@@ -465,14 +487,23 @@ def sanitize_messages(messages: list[Message]) -> list[Message]:
                     blocks.extend(msg.content)
                 else:
                     blocks.append(TextBlock(text=msg.content))
-                result[-1] = Message(role=prev.role, content=blocks)
+                result[-1] = Message(
+                    role=prev.role, content=blocks,
+                    reasoning_content=prev.reasoning_content,
+                )
             else:
                 # prev is list, msg is str
                 merged = list(prev.content)
                 merged.append(TextBlock(text=msg.content))
-                result[-1] = Message(role=prev.role, content=merged)
+                result[-1] = Message(
+                    role=prev.role, content=merged,
+                    reasoning_content=prev.reasoning_content,
+                )
         else:
-            result.append(Message(role=msg.role, content=msg.content))
+            result.append(Message(
+                role=msg.role, content=msg.content,
+                reasoning_content=msg.reasoning_content,
+            ))
 
     return result
 

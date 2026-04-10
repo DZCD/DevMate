@@ -1,4 +1,22 @@
 services:
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: devmate-chromadb
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   mcp-server:
     build: .
     container_name: devmate-mcp-server
@@ -8,6 +26,7 @@ services:
       - ./config.toml:/app/config.toml:ro
       - ./docs:/app/docs:ro
       - ./.skills:/app/.skills:ro
+      - ./devmate:/app/devmate:ro
     environment:
       - PYTHONPATH=/app/src:/app
     restart: unless-stopped
@@ -25,13 +44,24 @@ services:
       - ./config.toml:/app/config.toml:ro
       - ./docs:/app/docs:ro
       - ./.skills:/app/.skills:ro
+      - ./devmate:/app/devmate:ro
+      - ./output:/app/output
+      - ./:/app/workspace:ro
     environment:
       - PYTHONPATH=/app/src:/app
+      - MCP_URL=http://mcp-server:8001/mcp
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
     working_dir: /app
     entrypoint: ["python", "-m", "devmate"]
     command: ["chat"]
     depends_on:
       mcp-server:
         condition: service_healthy
+      chromadb:
+        condition: service_healthy
     stdin_open: true
     tty: true
+
+volumes:
+  chroma-data:

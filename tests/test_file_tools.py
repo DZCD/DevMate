@@ -28,9 +28,9 @@ def _get_tool(tools, name):
 
 
 def test_tools_count(tools) -> None:
-    """Test that create_file_tools returns exactly 11 tools."""
+    """Test that create_file_tools returns exactly 9 tools."""
     tool_names = [t.name for t in tools]
-    assert len(tools) == 11
+    assert len(tools) == 9
     for name in (
         "read",
         "write",
@@ -38,8 +38,6 @@ def test_tools_count(tools) -> None:
         "glob",
         "grep",
         "bash",
-        "codesearch",
-        "websearch",
         "webfetch",
         "create_file",
         "list_directory",
@@ -533,85 +531,12 @@ class TestBashTool:
 # ===========================================================================
 
 
-class TestCodesearchTool:
-    """Tests for the codesearch tool (Exa API via MCP)."""
-
-    def _mock_post_response(self, mock_client_cls):
-        """Return a mock response from the httpx.Client.post chain."""
-        return mock_client_cls.return_value.__enter__.return_value.post.return_value
-
-    @patch("httpx.Client")
-    def test_codesearch_success(self, mock_client_cls, tools) -> None:
-        """Test codesearch returns parsed content from SSE response."""
-        mock_response = self._mock_post_response(mock_client_cls)
-        mock_response.status_code = 200
-
-        # Simulate SSE response
-        import json as _json
-
-        sse_data = _json.dumps(
-            {"result": {"content": [{"text": "Here is some code search result."}]}}
-        )
-        mock_response.text = f"data: {sse_data}\n\n"
-
-        codesearch_tool = _get_tool(tools, "codesearch")
-        result = codesearch_tool.invoke({"query": "Python asyncio example"})
-
-        assert "code search result" in result
-
-    @patch("httpx.Client")
-    def test_codesearch_no_results(self, mock_client_cls, tools) -> None:
-        """Test codesearch with no relevant results."""
-        mock_response = self._mock_post_response(mock_client_cls)
-        mock_response.status_code = 200
-        mock_response.text = "data: {}\n\n"
-
-        codesearch_tool = _get_tool(tools, "codesearch")
-        result = codesearch_tool.invoke({"query": "nonexistent query"})
-
-        assert "No relevant" in result or "not found" in result.lower()
-
-    @patch("httpx.Client")
-    def test_codesearch_http_error(self, mock_client_cls, tools) -> None:
-        """Test codesearch handles HTTP error responses."""
-        mock_response = self._mock_post_response(mock_client_cls)
-        mock_response.status_code = 500
-        mock_response.text = "Internal Server Error"
-
-        codesearch_tool = _get_tool(tools, "codesearch")
-        result = codesearch_tool.invoke({"query": "test"})
-
-        assert "failed" in result.lower() or "500" in result
-
-    @patch("httpx.Client")
-    def test_codesearch_timeout(self, mock_client_cls, tools) -> None:
-        """Test codesearch handles timeout gracefully."""
-        import httpx as httpx_mod
-
-        (
-            mock_client_cls.return_value.__enter__.return_value.post.side_effect
-        ) = httpx_mod.TimeoutException("timeout")
-
-        codesearch_tool = _get_tool(tools, "codesearch")
-        result = codesearch_tool.invoke({"query": "test"})
-
-        assert "timed out" in result.lower()
-
-    def test_codesearch_tokens_num_clamped(self, tools) -> None:
-        """Test that tokens_num is clamped to [1000, 50000]."""
-        codesearch_tool = _get_tool(tools, "codesearch")
-        # Verify tokens_num is in the tool's args_schema fields
-        schema_fields = codesearch_tool.args_schema.model_fields
-        assert "tokens_num" in schema_fields
-
-
 # ===========================================================================
-# 8. webfetch — tests
+# 7. webfetch — tests
 # ===========================================================================
 
 
 class TestWebfetchTool:
-    """Tests for the webfetch tool."""
 
     def _mock_get_response(self, mock_client_cls):
         """Return a mock response from the httpx.Client.get chain."""

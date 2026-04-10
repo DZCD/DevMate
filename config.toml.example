@@ -3,25 +3,29 @@
 
 [model]
 base_url = "https://api.deepseek.com"
-api_key = "your_deepseek_api_key_here"
+api_key = "YOUR_DEEPSEEK_API_KEY_HERE"
 model_name = "deepseek-chat"
+embedding_model_name = "text-embedding-3-small"
 temperature = 0.7
 max_tokens = 4096
 
 [search]
 tavily_api_key = "YOUR_TAVILY_API_KEY_HERE"
 max_results = 5
+mcp_url = "http://localhost:8001/mcp"
 
 [langsmith]
-enabled = false
-langchain_api_key = "your_langchain_api_key_here"
+enabled = true
+langchain_tracing_v2 = true
+langchain_api_key = "YOUR_LANGSMITH_API_KEY_HERE"
+langchain_project = "devmate"
 project_name = "devmate"
 
 [embedding]
-provider = "jina"
-api_key = "YOUR_JINA_API_KEY"
-model_name = "jina-embeddings-v5-text-small"
-base_url = "https://api.jina.ai/v1"
+provider = "openai"
+api_key = "YOUR_EMBEDDING_API_KEY_HERE"
+model_name = "text-embedding-3-small"
+base_url = "https://api.openai.com/v1"
 
 [rag]
 docs_directory = "docs"
@@ -31,6 +35,20 @@ chunk_overlap = 200
 
 [skills]
 directory = ".skills"
+skills_dir = ".skills"
+auto_register = true
 
 [output]
 workspace_dir = "./output"
+
+[vision]
+# 图像理解专用 LLM 配置（必须支持 vision 能力）
+# 如果不配置，默认使用 [model] 的配置
+base_url = "https://api.moonshot.cn/v1"
+api_key = "YOUR_MOONSHOT_API_KEY_HERE"
+model_name = "kimi-k2.5"
+
+[mcp_server]
+host = "0.0.0.0"
+port = 8001
+route = "/mcp"

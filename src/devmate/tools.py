@@ -128,7 +128,18 @@ def langchain_tool_to_tool(lc_tool: Any) -> Tool:
     """
 
     async def _execute(**kwargs: Any) -> str:
-        result = lc_tool.invoke(kwargs)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Tool {lc_tool.name} called with kwargs: {kwargs}")
+        # Fix: Try multiple formats for MCP tools compatibility
+        if hasattr(lc_tool, "ainvoke"):
+            try:
+                result = await lc_tool.ainvoke(kwargs)
+            except Exception as e:
+                logger.error(f"Tool {lc_tool.name} failed: {e}")
+                raise
+        else:
+            result = lc_tool.invoke(kwargs)
         return str(result) if result is not None else ""
 
     # Extract JSON Schema from the LangChain tool

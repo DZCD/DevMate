@@ -35,8 +35,13 @@ def _create_search_web_tool(tavily_api_key: str, max_results: int = 5) -> types.
                     "type": "string",
                     "description": "The search query string",
                 },
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Multiple search queries (alternative to query)",
+                },
             },
-            "required": ["query"],
+            # Note: No required fields - accept both {"query": "..."} and {"queries": [...]}
         },
     )
 
@@ -116,8 +121,22 @@ def create_mcp_app(
     ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
         """Handle tool calls."""
         arguments = arguments or {}
+        # Handle both {"query": "..."} and {"queries": [...]} formats
         if name == "search_web":
             query = arguments.get("query", "")
+            
+            # Handle queries array format (langchain-mcp-adapters sends this)
+            if not query and "queries" in arguments:
+                queries = arguments["queries"]
+                if isinstance(queries, list) and queries:
+                    query = queries[0]  # Use first query
+            
+            # If still empty, try single value extraction
+            if not query and len(arguments) == 1:
+                val = list(arguments.values())[0]
+                if isinstance(val, str):
+                    query = val
+            
             if not query:
                 return [types.TextContent(type="text", text="Query is required.")]
             return await _execute_search_web(query, tavily_api_key, max_results)

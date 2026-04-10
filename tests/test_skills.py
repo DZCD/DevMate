@@ -291,9 +291,9 @@ def test_skills_create_tools() -> None:
         tools = manager.create_tools()
 
         tool_names = [t.name for t in tools]
-        assert "skill" in tool_names
-        assert "save_skill" in tool_names
-        assert "query_skills" in tool_names
+        assert "skill_load" in tool_names
+        assert "skill_save" in tool_names
+        assert "skill_query" in tool_names
 
 
 def test_skill_tool_invocation() -> None:
@@ -313,7 +313,7 @@ def test_skill_tool_invocation() -> None:
         manager.load_skills()
         tools = manager.create_tools()
 
-        skill_tool = next(t for t in tools if t.name == "skill")
+        skill_tool = next(t for t in tools if t.name == "skill_load")
         result = skill_tool.invoke({"name": "demo"})
         assert "Hello" in result
 
@@ -327,7 +327,7 @@ def test_save_skill_tool_invocation() -> None:
         manager = SkillsManager(skills_dir=skills_dir)
         tools = manager.create_tools()
 
-        save_tool = next(t for t in tools if t.name == "save_skill")
+        save_tool = next(t for t in tools if t.name == "skill_save")
         result = save_tool.invoke(
             {
                 "name": "tool_skill",

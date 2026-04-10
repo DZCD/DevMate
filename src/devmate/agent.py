@@ -16,15 +16,19 @@ import asyncio
 import logging
 from typing import Any
 
+from langsmith.run_helpers import traceable
+
 from devmate.config import (
     get_embedding_config,
     get_model_config,
     get_rag_config,
     get_search_config,
     get_skills_config,
+    get_vision_config,
     load_config,
 )
 from devmate.file_tools import create_file_tools
+from devmate.image_tool import create_image_understand_tool
 from devmate.llm import LLMToolDef, OpenAICompatibleAdapter  # noqa: E501
 from devmate.rag import RAGEngine, create_search_tool
 from devmate.skills import SkillsManager
@@ -77,13 +81,55 @@ The user will primarily request you perform software engineering tasks. This inc
 - Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are automatically added by the system, and bear no direct relation to the specific tool results or user messages in which they appear.
 </Doing tasks>
 
+<Information Gathering>
+When answering technical questions, building new services, or working with unfamiliar frameworks/APIs, you MUST proactively gather information before generating code:
+
+**CRITICAL RULES:**
+1. **ALWAYS search local knowledge base first**: Before writing ANY code, use `search_knowledge_base` to check internal coding standards, project templates, and architecture guidelines. This is REQUIRED even when the user provides external references like images, screenshots, or URLs.
+2. **Search the web for best practices**: Use `search_web` (via MCP) to look up the latest documentation, libraries, and patterns.
+3. **Combine all sources**: Integrate findings from local docs, web search, AND any user-provided references (images, requirements docs) to produce compliant output.
+4. **No exceptions**: Skipping the knowledge base search is not allowed, even with design references.\n\n**VISUAL vs TECHNICAL distinction:**\nWhen user provides a design reference (image/screenshot):\n- Image = VISUAL guidance only (colors, layout, look-and-feel)\n- Image does NOT provide technical implementation details\n- You MUST search web for: latest frameworks, best practices, coding patterns\n- Example: Screenshot shows a map → search "leaflet.js vs mapbox 2024 best practices" to implement it properly
+
+<Example: Building a Hiking Website with Design Reference>
+When the user asks: "Please refer to /app/workspace/hiking-screenshot.png as design reference, build a frontend website"
+
+**Good approach** (do this):
+- Call `image_understand` to analyze the design reference image
+- ALSO call `search_knowledge_base` with "frontend coding standards", "project templates", "CSS naming conventions"
+- ALSO call `search_web` with "hiking trail website best practices 2024" for latest patterns
+- Synthesize findings from ALL sources (image + local docs + web)
+- Create a plan using Task tool
+- Write code following internal standards while matching the design
+
+**Bad approach** (avoid this):
+- Only look at the image and start coding immediately
+- Skip `search_knowledge_base` because user provided a design reference
+- Ignore internal coding standards
+- Generate code that doesn't comply with project templates
+</Example>
+
+<Example: Building a FastAPI Service>
+When the user asks: "Build a FastAPI service for managing hiking trails"
+
+**Good approach** (do this):
+- Search web for "FastAPI best practices 2024 project structure", "SQLModel vs SQLAlchemy FastAPI"
+- Search knowledge base for "internal API design guidelines"
+- Analyze results and plan accordingly
+- Generate code following patterns found in docs
+
+**Bad approach** (avoid this):
+- Start coding immediately with outdated patterns
+- Skip web search and rely only on training data
+- Not checking local knowledge base for standards
+</Example>
+</Information Gathering>
+
 <Tool usage policy>
 - When doing file search, prefer to use the Task tool in order to reduce context usage.
 - When WebFetch returns a message about a redirect to a different host, you should immediately make a new WebFetch request with the redirect URL provided in the response.
 - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead. Never use placeholders or guess missing parameters in tool calls.
 - Use specialized tools instead of bash commands when possible, as this provides a better user experience. For file operations, use dedicated tools: Read for reading files instead of cat/head/tail, Edit for editing instead of sed/awk, and Write for creating files instead of cat with heredoc or echo redirection. Reserve bash tools exclusively for actual system commands and terminal operations that require shell execution. NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
 - VERY IMPORTANT: When exploring the codebase to gather context or to answer a question that is not a needle query for a specific file/class/function, it is CRITICAL that you use the Task tool instead of running search commands directly.
-- send_message tool is your only way to communicate with the user. You MUST call it at least once per interaction, otherwise the user will not receive your response.
 </Tool usage policy>
 
 <Workspace>
@@ -124,6 +170,7 @@ class DevMateAgent:
         self._llm_tool_defs: list[LLMToolDef] = []
         self._system_prompt: str = ""
         self._max_iterations: int = 50
+        self._mcp_client: Any | None = None
         logger.info("DevMate agent initialized")
 
     async def initialize(self) -> None:
@@ -132,13 +179,22 @@ class DevMateAgent:
 
         # 1. Initialize LLM (OpenAI-compatible adapter for DeepSeek)
         model_config = get_model_config(self._config)
-        self._llm = OpenAICompatibleAdapter(
-            api_key=model_config.get("api_key", ""),
-            base_url=model_config.get("base_url", "https://api.deepseek.com"),
-            model=model_config.get("model_name", "deepseek-chat"),
-            temperature=model_config.get("temperature", 0.7),
-            max_tokens=model_config.get("max_tokens", 8192),
-        )
+        if not model_config.get("model_name"):
+            msg = "config.toml [model] section must include 'model_name'"
+            raise ValueError(msg)
+        if not model_config.get("base_url"):
+            msg = "config.toml [model] section must include 'base_url'"
+            raise ValueError(msg)
+        llm_kwargs: dict[str, Any] = {
+            "api_key": model_config.get("api_key", ""),
+            "base_url": model_config["base_url"],
+            "model": model_config["model_name"],
+        }
+        if "temperature" in model_config:
+            llm_kwargs["temperature"] = model_config["temperature"]
+        if "max_tokens" in model_config:
+            llm_kwargs["max_tokens"] = model_config["max_tokens"]
+        self._llm = OpenAICompatibleAdapter(**llm_kwargs)
         logger.info("LLM initialized: %s", model_config.get("model_name"))
 
         # 2. Initialize Storage (FileStorage with local JSON files)
@@ -154,9 +210,12 @@ class DevMateAgent:
         # Resolve embedding credentials from [embedding] config section
         embedding_api_key = embedding_config.get("api_key")
         embedding_api_base = embedding_config.get("base_url")
-        embedding_model_name = embedding_config.get(
-            "model_name", "text-embedding-3-small"
-        )
+        embedding_model_name = embedding_config.get("model_name", "")
+        if not embedding_model_name:
+            logger.warning(
+                "No embedding model_name configured in [embedding] section"
+            )
+        embedding_provider = embedding_config.get("provider", "openai")
 
         try:
             self._rag_engine = RAGEngine(
@@ -164,8 +223,9 @@ class DevMateAgent:
                 chunk_size=rag_config.get("chunk_size", 1000),
                 chunk_overlap=rag_config.get("chunk_overlap", 200),
                 embedding_model_name=embedding_model_name,
-                openai_api_key=embedding_api_key,
-                openai_api_base=embedding_api_base,
+                embedding_provider=embedding_provider,
+                embedding_api_key=embedding_api_key,
+                embedding_base_url=embedding_api_base,
             )
             count = self._rag_engine.ingest_documents(docs_dir)
             logger.info("RAG engine ready (%d chunks indexed)", count)
@@ -190,15 +250,63 @@ class DevMateAgent:
 
         # 5. Build tool list using ToolRegistry
         self._tool_registry = ToolRegistry()
-        search_config = get_search_config(self._config)
-        tavily_api_key = search_config.get("tavily_api_key", "")
-        file_tools = create_file_tools(self._workspace, tavily_api_key=tavily_api_key)
+        file_tools = create_file_tools(self._workspace)
         for lc_tool in file_tools:
             self._tool_registry.register(langchain_tool_to_tool(lc_tool))
+
+        # 6. Connect to local MCP Server (graceful degradation)
+        try:
+            from langchain_mcp_adapters.client import MultiServerMCPClient
+
+            search_config = get_search_config(self._config)
+            import os
+
+            mcp_url = os.environ.get(
+                "MCP_URL",
+                search_config.get("mcp_url", "http://localhost:8001/mcp"),
+            )
+            self._mcp_client = MultiServerMCPClient(
+                connections={
+                    "devmate-search": {
+                        "transport": "streamable_http",
+                        "url": mcp_url,
+                    }
+                }
+            )
+            mcp_tools = await self._mcp_client.get_tools()
+            for lc_tool in mcp_tools:
+                try:
+                    self._tool_registry.register(
+                        langchain_tool_to_tool(lc_tool)
+                    )
+                except ValueError:
+                    # Skip tools already registered (e.g. websearch)
+                    logger.debug(
+                        "MCP tool '%s' already registered, skipping",
+                        lc_tool.name,
+                    )
+            logger.info(
+                "MCP Server connected, loaded %d MCP tools", len(mcp_tools)
+            )
+        except Exception as exc:
+            logger.warning(
+                "MCP Server not available, continuing without MCP tools: %s",
+                exc,
+            )
+            self._mcp_client = None
 
         if self._rag_engine:
             search_tool = create_search_tool(self._rag_engine)
             self._tool_registry.register(langchain_tool_to_tool(search_tool))
+
+        # 7. Image understanding tool (uses vision config, must support vision)
+        vision_config = get_vision_config(self._config)
+        image_tool = create_image_understand_tool(
+            api_key=vision_config.get("api_key", ""),
+            base_url=vision_config["base_url"],
+            model=vision_config["model_name"],
+        )
+        self._tool_registry.register(langchain_tool_to_tool(image_tool))
 
         skill_tools = (
             self._skills_manager.create_tools() if self._skills_manager else []
@@ -211,7 +319,7 @@ class DevMateAgent:
         self._llm_tool_defs = tools_to_llm_defs(self._tools)
         logger.info("Tools registered: %d", len(self._tools))
 
-        # 6. Build system prompt
+        # 8. Build system prompt
         self._build_system_prompt()
         logger.info("DevMate agent fully initialized")
 
@@ -236,6 +344,7 @@ class DevMateAgent:
             skills_section=skills_section,
         )
 
+    @traceable(name="agent_run", run_type="chain")
     async def run(self, prompt: str, user_id: str = "default") -> str:
         """Run the agent with a given prompt using the custom tool loop.
 
@@ -331,11 +440,16 @@ class DevMateAgent:
                     await add_message(
                         self._storage,
                         user_id,
-                        Message(role="assistant", content=assistant_blocks),
+                        Message(
+                            role="assistant",
+                            content=assistant_blocks,
+                            reasoning_content=response.reasoning_content,
+                        ),
                         date,
                     )
 
                     # Execute all tools concurrently using asyncio.gather
+                    @traceable(name="tool_execute", run_type="tool")
                     async def _execute_tool(tc: Any) -> ToolResultBlock:
                         """Execute a single tool call, returning a ToolResultBlock."""
                         try:
@@ -370,7 +484,11 @@ class DevMateAgent:
                     await add_message(
                         self._storage,
                         user_id,
-                        assistant_message(TextBlock(text=final_text)),
+                        Message(
+                            role="assistant",
+                            content=final_text,
+                            reasoning_content=response.reasoning_content,
+                        ),
                         date,
                     )
                     logger.info(
@@ -419,6 +537,7 @@ class DevMateAgent:
 
     async def cleanup(self) -> None:
         """Clean up resources."""
+        self._mcp_client = None
         logger.info("Agent cleanup complete")
 
 

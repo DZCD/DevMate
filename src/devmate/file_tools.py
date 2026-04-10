@@ -11,8 +11,6 @@ Tools:
     glob          — Filename pattern matching sorted by mtime
     grep          — Regex content search across files
     bash          — Execute shell commands with timeout
-    codesearch    — Exa API code search via MCP protocol
-    websearch     — Exa AI web search via MCP protocol (direct)
     webfetch      — HTTP page fetching with HTML-to-text extraction
     create_file   — (deprecated) Create a new file
     list_directory — (deprecated) List directory contents
@@ -205,14 +203,14 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
 # ===========================================================================
 
 
+
 def create_file_tools(
-    workspace: str | Path | None = None, tavily_api_key: str = ""
+    workspace: str | Path | None = None,
 ) -> list[Any]:
     """Create and return all file operation tools.
 
     Args:
         workspace: Root directory for file operations.  Defaults to cwd.
-        tavily_api_key: API key for Tavily web search.
 
     Returns:
         A list of LangChain ``@tool``-decorated callables.
@@ -1069,176 +1067,7 @@ def create_file_tools(
         return "\n".join(output_parts)
 
     # ------------------------------------------------------------------
-    # 7. codesearch
-    # ------------------------------------------------------------------
-    @tool
-    def codesearch(query: str, tokens_num: int = 5000) -> str:
-        """Search and get relevant context for any programming task using Exa Code API.
-
-        Provides high-quality, fresh context for libraries, SDKs, and APIs.
-        Returns comprehensive code examples, documentation, and API references.
-
-        Usage notes:
-          - Adjustable token count (1000-50000) for focused or comprehensive
-            results
-          - Default 5000 tokens provides balanced context for most queries
-          - Use lower values for specific questions, higher values for
-            comprehensive documentation
-
-        Args:
-            query: Search query for finding API, library, and SDK context.
-                Examples: 'React useState hook examples',
-                'Python pandas dataframe filtering'
-            tokens_num: Number of tokens to return (1000-50000), default 5000.
-        """
-        tokens_num = max(1000, min(50000, tokens_num))
-
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "get_code_context_exa",
-                "arguments": {"query": query, "tokensNum": tokens_num},
-            },
-        }
-
-        try:
-            import httpx
-        except ImportError:
-            return (
-                "codesearch requires the 'httpx' package. "
-                "Install with: pip install httpx"
-            )
-
-        try:
-            with httpx.Client(timeout=30.0) as client:
-                response = client.post(
-                    "https://mcp.exa.ai/mcp",
-                    json=payload,
-                    headers={
-                        "accept": "application/json, text/event-stream",
-                        "content-type": "application/json",
-                    },
-                )
-            if response.status_code != 200:
-                err = response.text[:500]
-                return f"Code search request failed ({response.status_code}): {err}"
-
-            # Parse SSE response
-            for line in response.text.split("\n"):
-                if line.startswith("data: "):
-                    try:
-                        data = json.loads(line[6:])
-                        content = data.get("result", {}).get("content", [])
-                        if content and content[0].get("text"):
-                            return content[0]["text"]
-                    except (ValueError, KeyError, IndexError):
-                        continue
-
-            return "No relevant code or documentation found. Try a more specific query."
-        except httpx.TimeoutException:
-            return "Code search request timed out (30s)"
-        except Exception as exc:
-            logger.error("codesearch failed: %s", exc)
-            return f"Code search failed: {exc}"
-
-    # ------------------------------------------------------------------
-    # 8. websearch — Tavily web search via MCP protocol (direct)
-    # ------------------------------------------------------------------
-    @tool
-    def websearch(
-        query: str,
-        num_results: int = 8,
-        livecrawl: str = "fallback",
-        type: str = "auto",
-        context_max_characters: int = 10000,
-    ) -> str:
-        """Web search tool powered by Tavily.
-
-        Search the internet for up-to-date information, documentation,
-        articles, and more. Today's date is 2026-04-07. Returns search
-        results with relevant content excerpts.
-
-        Use this when you need current information that may not be in
-        your training data.
-
-        Supports different search modes:
-          - 'auto' (balanced, default)
-          - 'fast' (quick results)
-          - 'deep' (comprehensive)
-
-        Args:
-            query: Search query keywords.
-            num_results: Number of results to return (default 8).
-            livecrawl: Crawl mode: 'fallback' (default) or 'preferred'.
-            type: Search type: 'auto', 'fast', or 'deep'.
-            context_max_characters: Max context chars per result (default 10000).
-        """
-        num_results = max(1, min(20, num_results))
-        if type not in ("auto", "fast", "deep"):
-            type = "auto"
-        search_depth = "advanced" if type == "deep" else "basic"
-
-        if not tavily_api_key:
-            return "Web search is not configured: missing Tavily API key."
-
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "tavily-search",
-                "arguments": {
-                    "query": query,
-                    "max_results": num_results,
-                    "search_depth": search_depth,
-                },
-            },
-        }
-
-        try:
-            import httpx
-        except ImportError:
-            return (
-                "websearch requires the 'httpx' package. "
-                "Install with: pip install httpx"
-            )
-
-        try:
-            with httpx.Client(timeout=25.0) as client:
-                response = client.post(
-                    f"https://mcp.tavily.com/mcp/?tavilyApiKey={tavily_api_key}",
-                    json=payload,
-                    headers={
-                        "accept": "application/json, text/event-stream",
-                        "content-type": "application/json",
-                    },
-                )
-            if response.status_code != 200:
-                err = response.text[:500]
-                return f"Web search request failed ({response.status_code}): {err}"
-
-            # Parse SSE response
-            for line in response.text.split("\n"):
-                if line.startswith("data: "):
-                    try:
-                        data = json.loads(line[6:])
-                        content = data.get("result", {}).get("content", [])
-                        if content and content[0].get("text"):
-                            return content[0]["text"]
-                    except (ValueError, KeyError, IndexError):
-                        continue
-
-            return "No search results found. Try a different query."
-        except httpx.TimeoutException:
-            return "Web search request timed out (25s)"
-        except Exception as exc:
-            logger.error("websearch failed: %s", exc)
-            return f"Web search failed: {exc}"
-
-    # ------------------------------------------------------------------
-    # 10. webfetch
+    # 7. webfetch
     # ------------------------------------------------------------------
     @tool
     def webfetch(url: str, max_chars: int = 50000) -> str:
@@ -1328,7 +1157,7 @@ def create_file_tools(
             return f"Web fetch failed: {exc}"
 
     # ------------------------------------------------------------------
-    # 11. create_file (deprecated, retained for backward compatibility)
+    # 8. create_file (deprecated, retained for backward compatibility)
     # ------------------------------------------------------------------
     @tool
     def create_file(file_path: str, content: str = "", overwrite: bool = False) -> str:
@@ -1365,7 +1194,7 @@ def create_file_tools(
             return f"Error creating file: {exc}"
 
     # ------------------------------------------------------------------
-    # 12. list_directory (deprecated, retained for backward compatibility)
+    # 9. list_directory (deprecated, retained for backward compatibility)
     # ------------------------------------------------------------------
     @tool
     def list_directory(dir_path: str = ".") -> str:
@@ -1419,8 +1248,6 @@ def create_file_tools(
         glob,
         grep,
         bash,
-        codesearch,
-        websearch,
         webfetch,
         create_file,
         list_directory,
